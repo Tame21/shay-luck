@@ -33,6 +33,56 @@ AOT_BASE_ONE = "base_one"
 AOT_VARIANTS = (AOT_LORA, AOT_BASE, AOT_BASE_ONE)
 
 
+def _aot_diag(stage, model, path=None, **details):
+    def method_location(name):
+        method = getattr(model, name, None)
+        method = getattr(method, "__func__", method)
+        code = getattr(method, "__code__", None)
+        if code is None:
+            return None
+        return f"{code.co_filename}:{code.co_firstlineno}"
+
+    config = getattr(model, "vllm_config", None)
+    model_config = getattr(config, "model_config", None)
+    compilation = getattr(config, "compilation_config", None)
+    parallel = getattr(config, "parallel_config", None)
+    aot_fn = getattr(model, "aot_compiled_fn", None)
+    state = {
+        "pid": os.getpid(),
+        "rank": getattr(parallel, "rank", None),
+        "dp_rank": getattr(parallel, "data_parallel_index", None),
+        "obj": hex(id(model)),
+        "class": f"{type(model).__module__}.{type(model).__qualname__}",
+        "flag": getattr(model, "_ascend_specialize_lora", None),
+        "encoder": getattr(model, "_is_encoder", None),
+        "lora_enabled": getattr(config, "lora_config", None) is not None,
+        "text_type": getattr(
+            getattr(model_config, "hf_text_config", None), "model_type", None
+        ),
+        "compile_mode": getattr(compilation, "mode", None),
+        "cudagraph_mode": getattr(compilation, "cudagraph_mode", None),
+        "cudagraph_specialize_lora": getattr(
+            compilation, "cudagraph_specialize_lora", None
+        ),
+        "enforce_eager": getattr(model_config, "enforce_eager", None),
+        "use_aot": vllm_envs.VLLM_USE_AOT_COMPILE,
+        "disable_cache": vllm_envs.VLLM_DISABLE_COMPILE_CACHE,
+        "compiled": getattr(model, "compiled", None),
+        "loaded": getattr(model, "was_aot_compile_fn_loaded_from_disk", None),
+        "instance_save": "save_aot_compiled_function" in vars(model),
+        "aot_method": method_location("aot_compile"),
+        "save_method": method_location("save_aot_compiled_function"),
+        "aot_fn": f"{type(aot_fn).__module__}.{type(aot_fn).__qualname__}",
+        "path": (
+            path
+            if path is not None
+            else getattr(model, "_aot_compilation_path", None)
+        ),
+    }
+    state.update(details)
+    logger.warning("[AOTDIAG] %s %s", stage, state)
+
+
 def clone_forward(self, suffix):
     original = self.forward.__func__
     changes = {"co_name": f"{original.__code__.co_name}_{suffix}"}
@@ -123,6 +173,7 @@ class AOTVariantDispatcher:
         self.artifacts[variant] = artifact
 
     def compile_variant(self, model, variant, args, kwargs):
+        _aot_diag("turbo.variant.compile", model, variant=variant)
         if variant != AOT_BASE_ONE:
             mark_variant_dynamic_inputs(model, variant, *args, **kwargs)
         compiled_callable = variant_callable(model, variant)
@@ -133,8 +184,20 @@ class AOTVariantDispatcher:
             )
         self.artifacts[variant] = compiled_callable.aot_compile((args, kwargs))
         self.dirty_variants.add(variant)
+        _aot_diag(
+            "turbo.variant.compiled",
+            model,
+            variant=variant,
+            artifacts=sorted(self.artifacts),
+        )
 
     def save_dirty(self, model):
+        _aot_diag(
+            "turbo.save_dirty",
+            model,
+            artifacts=sorted(self.artifacts),
+            dirty_variants=sorted(self.dirty_variants),
+        )
         if vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             return
         cache_dir = getattr(model, "_aot_cache_dir", None)
@@ -157,6 +220,7 @@ class AOTVariantDispatcher:
                     variant,
                     path,
                 )
+                _aot_diag("turbo.variant.saved", model, path, variant=variant)
             except Exception as error:
                 logger.warning(
                     "Unable to save LoRA %s AOT artifact to %s: %s",
@@ -189,8 +253,17 @@ class AOTVariantDispatcher:
 def wrap_aot_compile(original):
     @wraps(original)
     def aot_compile(self, *args, **kwargs):
+        _aot_diag("turbo.compile", self)
         if not getattr(self, "_ascend_specialize_lora", False):
-            return original(self, *args, **kwargs)
+            artifact = original(self, *args, **kwargs)
+            _aot_diag(
+                "turbo.compile.fallback",
+                self,
+                result_type=(
+                    f"{type(artifact).__module__}.{type(artifact).__qualname__}"
+                ),
+            )
+            return artifact
         dispatcher = getattr(self, "_ascend_preloaded_aot_dispatcher", None)
         if dispatcher is None:
             dispatcher = AOTVariantDispatcher()
@@ -199,12 +272,22 @@ def wrap_aot_compile(original):
         variant = select_variant(self)
         if variant not in dispatcher.artifacts:
             dispatcher.compile_variant(self, variant, args, kwargs)
+        _aot_diag(
+            "turbo.compile.dispatcher",
+            self,
+            variant=variant,
+            artifacts=sorted(dispatcher.artifacts),
+            result_type=(
+                f"{type(dispatcher).__module__}.{type(dispatcher).__qualname__}"
+            ),
+        )
         return dispatcher
 
     return aot_compile
 
 
 def save_aot_compiled_function(self):
+    _aot_diag("turbo.save", self)
     dispatcher = self.aot_compiled_fn
     if not isinstance(dispatcher, AOTVariantDispatcher):
         raise RuntimeError("Expected the LoRA AOT variant dispatcher")
@@ -214,8 +297,18 @@ def save_aot_compiled_function(self):
 def wrap_try_load_aot_compiled_fn(original):
     @wraps(original)
     def try_load_aot_compiled_fn(model, aot_compilation_path):
+        _aot_diag("turbo.load", model, aot_compilation_path)
         if not getattr(model, "_ascend_specialize_lora", False):
-            return original(model, aot_compilation_path)
+            artifact = original(model, aot_compilation_path)
+            _aot_diag(
+                "turbo.load.fallback",
+                model,
+                aot_compilation_path,
+                result_type=(
+                    f"{type(artifact).__module__}.{type(artifact).__qualname__}"
+                ),
+            )
+            return artifact
         dispatcher = AOTVariantDispatcher()
         for variant in AOT_VARIANTS:
             artifact = original(
@@ -224,6 +317,12 @@ def wrap_try_load_aot_compiled_fn(original):
             )
             if artifact is not None:
                 dispatcher.add_loaded(variant, artifact)
+        _aot_diag(
+            "turbo.load.variants",
+            model,
+            aot_compilation_path,
+            artifacts=sorted(dispatcher.artifacts),
+        )
         if not dispatcher.artifacts:
             return None
         model._aot_compilation_path = aot_compilation_path
@@ -231,6 +330,12 @@ def wrap_try_load_aot_compiled_fn(original):
         selected_variant = select_variant(model)
         if selected_variant not in dispatcher.artifacts:
             model._ascend_preloaded_aot_dispatcher = dispatcher
+            _aot_diag(
+                "turbo.load.partial",
+                model,
+                aot_compilation_path,
+                variant=selected_variant,
+            )
             return None
         return dispatcher
 
@@ -296,12 +401,22 @@ def wrap_init(original):
     def init(self, compile_prefix="", is_encoder=False):
         config = get_current_vllm_config()
         enabled = lora_compile_enabled(config, is_encoder)
+        _aot_diag(
+            "turbo.init.gate",
+            self,
+            enabled=enabled,
+            specialize=specialize_lora(config),
+            tag=backends.model_tag,
+            is_encoder=is_encoder,
+            compile_prefix=compile_prefix,
+        )
         if enabled:
             validate_lora_compile_config(config)
         call_original_init(original, self, compile_prefix, is_encoder, enabled)
         self._ascend_specialize_lora = enabled
         if enabled:
             initialize_lora_variants(self, compile_prefix)
+        _aot_diag("turbo.init.done", self, enabled=enabled)
 
     return init
 
