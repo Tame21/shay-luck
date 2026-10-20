@@ -75,6 +75,15 @@ turbo_lora_adn/
 
 目标属性通过 `TurboManager.register_patch()`、`TurboManager.apply_patches()` 应用。已有引用的传播由 TurboManager 提供；每个进程只构建一次替换对象，后续恢复不会增加 wrapper 层数。
 
+投影直接注册同名函数，例如：
+
+```python
+((f"{_PUNICA_TARGET}.add_lora_linear", add_lora_linear),)
+((f"{_PUNICA_TARGET}.add_lora_logits", add_lora_logits),)
+```
+
+没有 `_get_adn_operator()`、工厂生成的 dispatch 或投影 wrapper。`build_patches()` 就地注册模块级 `_adn_dispatch`；投影通过公共 `_call_adn()` 准备元数据，再显式调用 `torch.ops.vllm.netrsn_adn_lora_310p_0230`。只有初始化、元数据更新和 TP 路由需要保留原函数，因此仍使用包装。
+
 ## 5. ADN 直写与图适配
 
 普通累加路径直接把最终 `y`、真实 adapter 索引、A/B、scale 和 offset 交给 ADN，不建立宽临时 delta，不在外部执行 where 和 add_。
@@ -139,7 +148,7 @@ assert state.owner == "adn"
 pytest --noconftest -q --import-mode=importlib tests/test_turbo_lora_integration.py
 ```
 
-本地结果：22 项通过，1 项 GEMM 专属用例跳过。覆盖注册生命周期、310P/版本门禁、直接更新输出、grouped/token 形状调度、split/logits、元数据清尾和动态权重。
+本地结果：33 项通过，1 项 GEMM 专属用例跳过。覆盖注册生命周期、310P/版本门禁、直接更新输出、grouped/token 形状调度、split/logits、元数据清尾和动态权重，以及直接函数注册和全部 split 阶段的覆写/累加行为。
 
 本地测试使用 CPU Torch 和模拟 ADN、TurboManager 契约。当前工作区没有完整 NetrsnTurbo 源码和 310P，实际 Turbo 注册、spawn、CANN/ADN 数值与 ACLGraph 均需在目标环境继续验证。
 

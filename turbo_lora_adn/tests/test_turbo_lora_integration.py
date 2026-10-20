@@ -455,3 +455,89 @@ def test_adn_split_overwrite_and_sampler_indices(make_env):
     wrapper.add_lora_logits(y, x, a, b, 0.5, add_inputs=False)
     torch.testing.assert_close(y, torch.tensor([[0.0, 0.0], [3.0, 3.0], [0.0, 0.0], [3.0, 3.0]]))
     assert env.calls[-1].indices.tolist() == [-1, 0, -1, 0]
+
+
+def test_projection_registrations_are_direct_module_functions(make_env):
+    env = make_env()
+    env.entry()
+    payload = importlib.import_module(PACKAGE + ".patches")
+    registered = dict(env.registrations)
+    for name in (
+        "add_lora_linear",
+        "add_lora_logits",
+        "_shrink_prefill",
+        "_shrink_decode",
+        "_expand_prefill",
+        "_expand_decode",
+        "_expand_slice_prefill",
+        "_expand_slice_decode",
+    ):
+        replacement = registered[f"{PUNICA}.{name}"]
+        assert replacement is getattr(payload, name)
+        assert replacement is getattr(env.cls, name)
+        assert not hasattr(replacement, "__wrapped__")
+    assert env.custom_ops[0].function is payload._adn_dispatch
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_direct_shrink_overwrites_rank_only_and_selects_explicit_phase(make_env, phase):
+    env = make_env()
+    env.entry()
+    slots = [0, 0, -1, -1]
+    wrapper = _wrapper(env, slots)
+    # A directly selected split method owns its phase. It must not pick up a
+    # stale wrapper flag or accidentally share the other phase's closure.
+    wrapper.is_prefill = phase != "prefill"
+    x = torch.arange(12).reshape(2, 2, 3).float() / 7
+    weight = torch.arange(6).reshape(1, 1, 2, 3).float() / 11
+    y = torch.full((2, 2, 4), 19.0)
+    expected = y.clone().view(4, 4)
+    expected[:, :2] = _project(x.reshape(4, 3), None, weight, slots, 0.375, y.dtype)
+
+    getattr(wrapper, f"_shrink_{phase}")(y, x, weight, 0.375)
+
+    torch.testing.assert_close(y.view(4, 4), expected)
+    assert len(env.calls) == 1
+    call = env.calls[0]
+    assert call.weight_a is None and call.weight_b is weight
+    assert call.y.data_ptr() == y.data_ptr()
+    assert call.y_offset == 0 and call.scale == 0.375
+    assert (call.indices is None) == (phase == "prefill")
+    if phase == "decode":
+        assert call.indices.tolist() == slots
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+@pytest.mark.parametrize("sliced", [False, True], ids=["expand", "expand_slice"])
+@pytest.mark.parametrize("add_inputs", [False, True], ids=["overwrite", "accumulate"])
+def test_direct_expand_preserves_offsets_and_explicit_phase(make_env, phase, sliced, add_inputs):
+    env = make_env()
+    env.entry()
+    slots = [0, 0, -1, -1]
+    wrapper = _wrapper(env, slots)
+    wrapper.is_prefill = phase != "prefill"
+    x = torch.arange(12).reshape(2, 2, 3).float() / 7
+    weight = torch.arange(9).reshape(1, 1, 3, 3).float() / 11
+    y = torch.full((2, 2, 7), 13.0)
+    offset = 2 if sliced else 0
+    delta = _project(x.reshape(4, 3), None, weight, slots, 1.0, y.dtype)
+    expected = y.clone().view(4, 7)
+    if add_inputs:
+        expected[:, offset : offset + 3] += delta
+    else:
+        expected[:, offset : offset + 3] = delta
+
+    if sliced:
+        getattr(wrapper, f"_expand_slice_{phase}")(y, x, weight, offset, 3, add_inputs)
+    else:
+        getattr(wrapper, f"_expand_{phase}")(y, x, weight, add_inputs)
+
+    torch.testing.assert_close(y.view(4, 7), expected)
+    assert len(env.calls) == 1
+    call = env.calls[0]
+    assert call.weight_a is None and call.weight_b is weight
+    assert call.y.data_ptr() == y.data_ptr()
+    assert call.y_offset == offset and call.scale == 1.0
+    assert (call.indices is None) == (phase == "prefill")
+    if phase == "decode":
+        assert call.indices.tolist() == slots

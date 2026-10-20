@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build the v0.23 ADN LoRA replacements for TurboManager.
 
-The bootstrap owns version/device checks and installation. This module never
-assigns framework attributes and does not import any custom vLLM Ascend patch.
-ADN is imported only when ``build_patches`` is called after those checks.
+The bootstrap imports this module only after its version/310P checks pass.
+Projection replacements are ordinary named functions; build_patches registers
+the graph dispatcher and returns them directly to TurboManager.
 """
 
 from __future__ import annotations
@@ -11,9 +11,11 @@ from __future__ import annotations
 from functools import wraps
 
 import torch
+from adn_custom_ops import adn_batch_gather_matmul_
 from vllm.logger import logger
 from vllm.lora.layers import column_parallel_linear
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
 _ADN_SLICE_MODE = 1
@@ -70,75 +72,54 @@ def _wrap_prefill_metadata(original):
     return update_prefill_metadata
 
 
-def _make_adn_dispatch(adn_op):
-    def dispatch(
-        y: torch.Tensor,
-        x: torch.Tensor,
-        weight_a: torch.Tensor | None,
-        weight_b: torch.Tensor,
-        indices: torch.Tensor,
-        lora_order: torch.Tensor,
-        lora_batch_num: torch.Tensor,
-        scale: float,
-        y_offset: int,
-        grouped: bool,
-    ) -> None:
-        # Execute this shape choice behind an opaque operator boundary. A
-        # Python branch in forward could be frozen across a compiled range.
-        if grouped and lora_order.shape[0] < min(x.shape[0], y.shape[0]):
-            adn_op(
-                y,
-                x=x,
-                weight_a=weight_a,
-                weight_b=weight_b,
-                indices=None,
-                lora_order=lora_order,
-                lora_batch_num=lora_batch_num,
-                layer_idx=0,
-                scale=scale,
-                y_offset=y_offset,
-                y_slice_size=_ADN_SLICE_MODE,
-            )
-        else:
-            adn_op(
-                y,
-                x=x,
-                weight_a=weight_a,
-                weight_b=weight_b,
-                indices=indices,
-                layer_idx=0,
-                scale=scale,
-                y_offset=y_offset,
-                y_slice_size=_ADN_SLICE_MODE,
-            )
-
-    return dispatch
+def _adn_dispatch(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    weight_a: torch.Tensor | None,
+    weight_b: torch.Tensor,
+    indices: torch.Tensor,
+    lora_order: torch.Tensor,
+    lora_batch_num: torch.Tensor,
+    scale: float,
+    y_offset: int,
+    grouped: bool,
+) -> None:
+    # Keep the shape choice inside the registered op so an unguarded compiled
+    # range does not freeze the first choice. Small shapes use the token API.
+    if grouped and lora_order.shape[0] < min(x.shape[0], y.shape[0]):
+        adn_batch_gather_matmul_(
+            y,
+            x=x,
+            weight_a=weight_a,
+            weight_b=weight_b,
+            indices=None,
+            lora_order=lora_order,
+            lora_batch_num=lora_batch_num,
+            layer_idx=0,
+            scale=scale,
+            y_offset=y_offset,
+            y_slice_size=_ADN_SLICE_MODE,
+        )
+    else:
+        adn_batch_gather_matmul_(
+            y,
+            x=x,
+            weight_a=weight_a,
+            weight_b=weight_b,
+            indices=indices,
+            layer_idx=0,
+            scale=scale,
+            y_offset=y_offset,
+            y_slice_size=_ADN_SLICE_MODE,
+        )
 
 
 def _adn_dispatch_fake(*args, **kwargs) -> None:
     return None
 
 
-def _get_adn_operator():
-    # Lazy loading is required: importing an inactive Turbo payload must not
-    # require the private extension or register a custom operator.
-    import adn_custom_ops
-    from vllm.utils.torch_utils import direct_register_custom_op
-
-    try:
-        torch._C._dispatch_find_schema_or_throw(f"vllm::{_ADN_OP_NAME}", "")
-    except RuntimeError:
-        direct_register_custom_op(
-            op_name=_ADN_OP_NAME,
-            op_func=_make_adn_dispatch(adn_custom_ops.adn_batch_gather_matmul_),
-            mutates_args=["y"],
-            fake_impl=_adn_dispatch_fake,
-            dispatch_key="PrivateUse1",
-        )
-    return getattr(torch.ops.vllm, _ADN_OP_NAME)
-
-
-def _call_adn(self, adn_op, y, x, weight_a, weight_b, scale, y_offset, *, grouped, indices=None):
+def _call_adn(self, y, x, weight_a, weight_b, scale, y_offset, *, grouped, indices=None):
+    """Prepare shared metadata, then invoke the registered ADN dispatcher."""
     if indices is None:
         indices = self._get_token_lora_indices(x)
     indices = indices.to(torch.int32)
@@ -148,7 +129,9 @@ def _call_adn(self, adn_op, y, x, weight_a, weight_b, scale, y_offset, *, groupe
     else:
         # The token API ignores group arguments; avoid unused metadata casts.
         lora_order = lora_batch_num = indices
-    adn_op(y, x, weight_a, weight_b, indices, lora_order, lora_batch_num, scale, y_offset, grouped)
+    torch.ops.vllm.netrsn_adn_lora_310p_0230(
+        y, x, weight_a, weight_b, indices, lora_order, lora_batch_num, scale, y_offset, grouped
+    )
     if not torch.compiler.is_compiling() and not getattr(self, "_netrsn_adn_logged_dispatch", False):
         logger.info(
             "[Turbo ADN LoRA] adn_batch_gather_matmul_ dispatch returned (eager/warmup); "
@@ -157,80 +140,82 @@ def _call_adn(self, adn_op, y, x, weight_a, weight_b, scale, y_offset, *, groupe
         self._netrsn_adn_logged_dispatch = True
 
 
-def _wrap_add_lora_linear(original, adn_op):
-    @wraps(original)
-    def add_lora_linear(self, y, x, lora_a_stacked, lora_b_stacked, scale, output_slices, *, buffer=None, **kwargs):
-        assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        x2d = x.reshape(-1, x.shape[-1])
-        y2d = y.view(-1, y.shape[-1])
-        offset = 0
-        for a, b, width in zip(lora_a_stacked, lora_b_stacked, output_slices):
-            if not kwargs.get("add_inputs", True):
-                y2d[:, offset : offset + width].zero_()
-            # V1 sets is_prefill=True even on decode. Preserve its metadata
-            # routing; the opaque operator chooses a shape-compatible ABI.
-            _call_adn(self, adn_op, y2d, x2d, a, b, scale, offset, grouped=self.is_prefill)
-            offset += width
-
-    return add_lora_linear
-
-
-def _wrap_shrink(original, adn_op, *, grouped):
-    @wraps(original)
-    def shrink(self, y, x, w_t_all, scale):
-        y2d = y.view(-1, y.shape[-1])
-        x2d = x.reshape(-1, x.shape[-1])
-        # ADN accumulates; shrink must overwrite its existing rank scratch.
-        y2d[:, : w_t_all.shape[-2]].zero_()
-        _call_adn(self, adn_op, y2d, x2d, None, w_t_all, scale, 0, grouped=grouped)
-
-    return shrink
-
-
-def _wrap_expand(original, adn_op, *, grouped, sliced=False):
-    def project(self, y, x, w_t_all, y_offset, width, add_inputs):
-        y2d = y.view(-1, y.shape[-1])
-        x2d = x.reshape(-1, x.shape[-1])
-        if not add_inputs:
-            y2d[:, y_offset : y_offset + width].zero_()
-        _call_adn(self, adn_op, y2d, x2d, None, w_t_all, 1.0, y_offset, grouped=grouped)
-
-    if sliced:
-
-        @wraps(original)
-        def expand(self, y, x, w_t_all, y_offset, y_slice_size, add_inputs):
-            project(self, y, x, w_t_all, y_offset, y_slice_size, add_inputs)
-
-    else:
-
-        @wraps(original)
-        def expand(self, y, x, w_t_all, add_inputs):
-            project(self, y, x, w_t_all, 0, min(w_t_all.shape[-2], y.shape[-1]), add_inputs)
-
-    return expand
-
-
-def _wrap_add_lora_logits(original, adn_op):
-    @wraps(original)
-    def add_lora_logits(self, y, x, lora_a_stacked, lora_b_stacked, scale, *, buffer=None, **kwargs):
-        y2d = y.view(-1, y.shape[-1])
-        x2d = x.reshape(-1, x.shape[-1])
+def add_lora_linear(self, y, x, lora_a_stacked, lora_b_stacked, scale, output_slices, *, buffer=None, **kwargs):
+    assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+    x = x.reshape(-1, x.shape[-1])
+    y = y.view(-1, y.shape[-1])
+    offset = 0
+    for a, b, width in zip(lora_a_stacked, lora_b_stacked, output_slices):
         if not kwargs.get("add_inputs", True):
-            y2d[:, : lora_b_stacked.shape[-2]].zero_()
-        _call_adn(
-            self,
-            adn_op,
-            y2d,
-            x2d,
-            lora_a_stacked,
-            lora_b_stacked,
-            scale,
-            0,
-            grouped=False,
-            indices=self._sampler_indices[: x2d.shape[0]],
-        )
+            y[:, offset : offset + width].zero_()
+        # V1 also uses is_prefill=True on decode; dispatch checks actual shape.
+        _call_adn(self, y, x, a, b, scale, offset, grouped=self.is_prefill)
+        offset += width
 
-    return add_lora_logits
+
+def add_lora_logits(self, y, x, lora_a_stacked, lora_b_stacked, scale, *, buffer=None, **kwargs):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    if not kwargs.get("add_inputs", True):
+        y[:, : lora_b_stacked.shape[-2]].zero_()
+    _call_adn(
+        self,
+        y,
+        x,
+        lora_a_stacked,
+        lora_b_stacked,
+        scale,
+        0,
+        grouped=False,
+        indices=self._sampler_indices[: x.shape[0]],
+    )
+
+
+def _shrink_prefill(self, y, x, w_t_all, scale):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    # ADN accumulates; shrink must overwrite the existing rank scratch.
+    y[:, : w_t_all.shape[-2]].zero_()
+    _call_adn(self, y, x, None, w_t_all, scale, 0, grouped=True)
+
+
+def _shrink_decode(self, y, x, w_t_all, scale):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    y[:, : w_t_all.shape[-2]].zero_()
+    _call_adn(self, y, x, None, w_t_all, scale, 0, grouped=False)
+
+
+def _expand_prefill(self, y, x, w_t_all, add_inputs):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    if not add_inputs:
+        y[:, : min(w_t_all.shape[-2], y.shape[-1])].zero_()
+    _call_adn(self, y, x, None, w_t_all, 1.0, 0, grouped=True)
+
+
+def _expand_decode(self, y, x, w_t_all, add_inputs):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    if not add_inputs:
+        y[:, : min(w_t_all.shape[-2], y.shape[-1])].zero_()
+    _call_adn(self, y, x, None, w_t_all, 1.0, 0, grouped=False)
+
+
+def _expand_slice_prefill(self, y, x, w_t_all, y_offset, y_slice_size, add_inputs):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    if not add_inputs:
+        y[:, y_offset : y_offset + y_slice_size].zero_()
+    _call_adn(self, y, x, None, w_t_all, 1.0, y_offset, grouped=True)
+
+
+def _expand_slice_decode(self, y, x, w_t_all, y_offset, y_slice_size, add_inputs):
+    y = y.view(-1, y.shape[-1])
+    x = x.reshape(-1, x.shape[-1])
+    if not add_inputs:
+        y[:, y_offset : y_offset + y_slice_size].zero_()
+    _call_adn(self, y, x, None, w_t_all, 1.0, y_offset, grouped=False)
 
 
 def build_patches() -> list[tuple[str, object]]:
@@ -240,25 +225,29 @@ def build_patches() -> list[tuple[str, object]]:
     between shrink and expand. Resident A/B tensors are read on every call,
     preserving separately deployed, dynamically loaded adapters.
     """
-    adn_op = _get_adn_operator()
+    # Registration happens once here. Forward calls the torch.ops name above.
+    try:
+        torch._C._dispatch_find_schema_or_throw(f"vllm::{_ADN_OP_NAME}", "")
+    except RuntimeError:
+        direct_register_custom_op(
+            op_name=_ADN_OP_NAME,
+            op_func=_adn_dispatch,
+            mutates_args=["y"],
+            fake_impl=_adn_dispatch_fake,
+            dispatch_key="PrivateUse1",
+        )
     cls = PunicaWrapperNPU
-    patches = [
+    return [
         ("vllm.lora.layers.column_parallel_linear._mcp_apply", _wrap_mcp_apply(column_parallel_linear._mcp_apply)),
         (f"{_PUNICA_TARGET}.__init__", _wrap_init(cls.__init__)),
         (f"{_PUNICA_TARGET}._update_base_metadata", _wrap_base_metadata(cls._update_base_metadata)),
         (f"{_PUNICA_TARGET}._update_prefill_metadata", _wrap_prefill_metadata(cls._update_prefill_metadata)),
-        (f"{_PUNICA_TARGET}.add_lora_linear", _wrap_add_lora_linear(cls.add_lora_linear, adn_op)),
-        (f"{_PUNICA_TARGET}.add_lora_logits", _wrap_add_lora_logits(cls.add_lora_logits, adn_op)),
+        (f"{_PUNICA_TARGET}.add_lora_linear", add_lora_linear),
+        (f"{_PUNICA_TARGET}.add_lora_logits", add_lora_logits),
+        (f"{_PUNICA_TARGET}._shrink_prefill", _shrink_prefill),
+        (f"{_PUNICA_TARGET}._shrink_decode", _shrink_decode),
+        (f"{_PUNICA_TARGET}._expand_prefill", _expand_prefill),
+        (f"{_PUNICA_TARGET}._expand_decode", _expand_decode),
+        (f"{_PUNICA_TARGET}._expand_slice_prefill", _expand_slice_prefill),
+        (f"{_PUNICA_TARGET}._expand_slice_decode", _expand_slice_decode),
     ]
-    for suffix, grouped in (("prefill", True), ("decode", False)):
-        name = f"_shrink_{suffix}"
-        patches.append((f"{_PUNICA_TARGET}.{name}", _wrap_shrink(getattr(cls, name), adn_op, grouped=grouped)))
-        for sliced in (False, True):
-            name = f"_expand_{'slice_' if sliced else ''}{suffix}"
-            patches.append(
-                (
-                    f"{_PUNICA_TARGET}.{name}",
-                    _wrap_expand(getattr(cls, name), adn_op, grouped=grouped, sliced=sliced),
-                )
-            )
-    return patches
