@@ -62,7 +62,7 @@ turbo_lora_shared_gemm/
 | `vllm.lora.layers.column_parallel_linear._mcp_apply` | 普通非 fully-sharded、TP>1 使用已有同步路径，避免重复聚合完整 rank |
 | `PunicaWrapperNPU.__init__` | token-to-slot 缓冲区初始化为 `-1` |
 | `PunicaWrapperNPU._update_base_metadata` | 有效 token 之后清尾为 `-1` |
-| `PunicaWrapperNPU._shrink_prefill` | 单槽共享 A 矩阵，保留 FP32 scratch、scale 和覆写语义 |
+| `PunicaWrapperNPU._shrink_prefill` | 单槽 FP16 输入/权重使用 FP16 A 投影，结果转回 FP32 后缩放，保留 scratch 和覆写语义 |
 | `PunicaWrapperNPU._expand_prefill` | 单槽共享 B 矩阵，保留累加/覆写语义 |
 | `PunicaWrapperNPU._expand_slice_prefill` | 保留输出切片和基础模型/padding 掩码 |
 | `vllm_ascend.utils.adapt_patch` | 原生 platform/worker 补丁返回后，检查并恢复上述已注册替换 |
@@ -75,6 +75,9 @@ turbo_lora_shared_gemm/
 
 - 仅在 vLLM `0.23.x` 且 `vllm_ascend.utils.is_310p()` 为真时应用。0.22、0.24 以及其他设备直接跳过，不按 `>=0.23` 无限扩展。
 - 单槽条件是 `weights.shape[0] == 1`；多槽仍保留 gather/einsum。
+- A 投影优化仅在单槽、输入与 A 权重均为 FP16、scratch 为 FP32 时启用：`FP16 GEMM → rank 结果转 FP32 → FP32 scale → 写回原 scratch`。不再为此投影将大尺寸输入与 A 转为 FP32。
+- 多槽、FP32 输入或混合 dtype 继续按 scratch dtype 计算。B 投影、基础模型/padding 的掩码、TP 通信和动态权重读取均保持原有逻辑，没有缓存独立的 A 权重副本。
+- FP16 GEMM 的输出舍入与溢出行为不同于原 FP32 投影；后续转 FP32 不能恢复已损失精度，缩放前溢出也不会被较小的 scale 修复。需要在实际 adapter 上检查 logits、生成结果及非有限值。符合上述条件的 fully-sharded shrink 同样会先产生 FP16 结果，通信布局虽保持不变，其累加精度也需验收。
 - 不需要 `adn_custom_ops`，没有直接写入 A/B 融合算子的路径。
 - 基础 W 不变；动态 adapter 权重继续由 vLLM 原地更新，forward 读取当前 A/B。
 - 不启用 LoRA 时不进入这些投影；启用 LoRA 后请求基础模型，仍有先计算投影、再掩码清零的开销。
@@ -104,6 +107,8 @@ assert state.owner == "shared_gemm"
 pytest --noconftest -q --import-mode=importlib tests/test_turbo_lora_integration.py
 ```
 
-本地结果：18 项通过，5 项 ADN 专属用例跳过。覆盖注册门禁、重复应用、原生补丁晚覆盖、方案互斥、TP 分支、元数据清尾和 CPU 数值行为。
+本地结果：26 项通过，5 项 ADN 专属用例跳过（CPU Torch 2.9.1、Python 3.12）。覆盖注册门禁、重复应用、原生补丁晚覆盖、方案互斥、TP 分支、元数据清尾，以及 FP16 GEMM/FP32 scale 的实际 dtype、投影舍入、动态 A 更新和其他 dtype/多槽的 FP32 回归。
 
 测试使用 CPU Torch，并模拟文档中 TurboManager 的目标替换/引用传播契约。当前工作区没有 NetrsnTurbo 的完整引擎源码，也没有真实 310P，因此需要在目标环境继续验证实际 TurboManager、spawn 加载链、ACLGraph 和吞吐。此前 VA 方案的测试结果不能直接当作这次 Turbo 接入已经在设备上验收。
+
+此次优化的目标场景为输入 4K、输出 4、并发 2、adapter rank 16，`--max-loras 1 --max-lora-rank 16`，关闭 chunked prefill。与优化前版本在相同设备和参数下分别启动、充分预热后比较 TTFT 中位数/P95，并核对相同提示的 logits 与生成结果。历史实测 3.88s、目标不高于 3.5s；本地 CPU 测试不能证明已达到该性能目标。

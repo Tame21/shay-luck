@@ -34,9 +34,12 @@ def _token_delta(self, x: torch.Tensor, weights: torch.Tensor, dtype: torch.dtyp
 
 
 def _shrink_prefill(self, y, x, w_t_all, scale):
-    # v0.23 allocates the standard shrink scratch buffer in FP32. Preserve the
-    # buffer dtype rather than forcing the projection to the model dtype.
-    delta = _token_delta(self, x, w_t_all, y.dtype)
+    compute_dtype = y.dtype
+    if w_t_all.shape[0] == 1 and x.dtype == w_t_all.dtype == torch.float16 and y.dtype == torch.float32:
+        # Project the large input in FP16, then promote the small rank result.
+        # Keep the FP32 scratch and apply scale in FP32 as before.
+        compute_dtype = torch.float16
+    delta = _token_delta(self, x, w_t_all, compute_dtype).to(dtype=y.dtype)
     y[:, : delta.shape[1]].copy_(delta * scale)
 
 

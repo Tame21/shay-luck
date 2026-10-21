@@ -16,6 +16,7 @@ from typing import ClassVar
 
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "adn" if ROOT.name == "turbo_lora_adn" else "shared_gemm"
@@ -419,6 +420,95 @@ def test_gemm_fp32_shrink_masks_base_and_nan_padding(make_env):
     torch.testing.assert_close(y[:, :2], torch.tensor([[1.5, 1.5], [1.5, 1.5], [0, 0], [0, 0]]))
     assert y.dtype == torch.float32
     assert torch.all(y[:, 2:] == 11)
+
+
+class _ProjectionDtypes(TorchDispatchMode):
+    """Observe actual torch kernels rather than inferring dtype from outputs."""
+
+    def __init__(self):
+        super().__init__()
+        self.matrix_inputs = []
+        self.scale_inputs = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func in (torch.ops.aten.mm.default, torch.ops.aten.bmm.default):
+            self.matrix_inputs.append((args[0].dtype, args[1].dtype))
+        elif func is torch.ops.aten.mul.Tensor:
+            self.scale_inputs.append(args[0].dtype)
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("rows", [1, 4], ids=["v1_decode_one_token", "multiple_tokens"])
+@pytest.mark.parametrize("four_dimensional", [False, True], ids=["3d_weights", "4d_weights"])
+def test_single_slot_half_shrink_uses_half_mm_then_fp32_scale(make_env, rows, four_dimensional):
+    env = make_env()
+    env.entry()
+    slots = [0] if rows == 1 else [0, 0, -1, -1]
+    wrapper = _wrapper(env, slots)
+    x = torch.tensor([[0.1, 0.2, 0.3]], dtype=torch.float16).repeat(rows, 1)
+    a = torch.tensor([[[0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]], dtype=torch.float16)
+    if four_dimensional:
+        a = a.unsqueeze(1)
+    matrix = a[0, 0] if four_dimensional else a[0]
+    scale = 0.37
+    half_product = x @ matrix.T
+    expected = half_product.float() * scale
+    expected[torch.tensor(slots) < 0] = 0
+    # These inputs distinguish both the former FP32 GEMM and an incorrect
+    # implementation that applies scale before promoting the half result.
+    assert torch.any(expected[0] != (x.float() @ matrix.float().T * scale)[0])
+    assert torch.any(expected[0] != (half_product * scale).float()[0])
+    y = torch.full((rows, 4), 11.0, dtype=torch.float32)
+
+    with _ProjectionDtypes() as observed:
+        wrapper._shrink_prefill(y, x, a, scale)
+
+    assert observed.matrix_inputs == [(torch.float16, torch.float16)]
+    assert observed.scale_inputs == [torch.float32]
+    assert y.dtype == torch.float32
+    torch.testing.assert_close(y[:, :2], expected, rtol=0, atol=0)
+    assert torch.all(y[:, 2:] == 11)
+
+    # Dynamic loading mutates resident A; the optimized path must read those
+    # values anew rather than retaining a converted/cached matrix.
+    a.add_(0.125)
+    expected_updated = (x @ matrix.T).float() * scale
+    expected_updated[torch.tensor(slots) < 0] = 0
+    assert torch.any(expected_updated[0] != expected[0])
+    wrapper._shrink_prefill(y, x, a, scale)
+    torch.testing.assert_close(y[:, :2], expected_updated, rtol=0, atol=0)
+    assert torch.all(y[:, 2:] == 11)
+
+
+@pytest.mark.parametrize(
+    "slots,x_dtype,weight_dtype",
+    [
+        (2, torch.float16, torch.float16),
+        (1, torch.float32, torch.float32),
+        (1, torch.float32, torch.float16),
+        (1, torch.float16, torch.float32),
+    ],
+    ids=["multiple_adapters", "fp32_inputs", "fp32_x_half_a", "half_x_fp32_a"],
+)
+def test_other_shrink_inputs_preserve_fp32_projection(make_env, slots, x_dtype, weight_dtype):
+    env = make_env()
+    env.entry()
+    indices = [0, slots - 1, -1, 0]
+    wrapper = _wrapper(env, indices, groups=4)
+    x = torch.arange(12).reshape(4, 3).to(x_dtype) / 7
+    a = torch.arange(slots * 6).reshape(slots, 1, 2, 3).to(weight_dtype) / 11
+    scale = 0.37
+    y = torch.full((4, 4), 13.0, dtype=torch.float32)
+    expected = _project(x, None, a, indices, scale, torch.float32)
+
+    with _ProjectionDtypes() as observed:
+        wrapper._shrink_prefill(y, x, a, scale)
+
+    assert observed.matrix_inputs == [(torch.float32, torch.float32)]
+    assert observed.scale_inputs == [torch.float32]
+    assert y.dtype == torch.float32
+    torch.testing.assert_close(y[:, :2], expected)
+    assert torch.all(y[:, 2:] == 13)
 
 
 @pytest.mark.skipif(OWNER != "adn", reason="ADN shape ABI")
