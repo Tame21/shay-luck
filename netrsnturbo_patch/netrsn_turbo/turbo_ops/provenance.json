@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "component": "netrsn_turbo.turbo_ops",
+  "migration_date": "2026-11-02",
+  "hash_format": "SHA256 of UTF-8 source text with CRLF normalized to LF; terminal newlines are preserved.",
+  "upstream_repository": "https://github.com/vllm-project/vllm-ascend",
+  "upstream_branch": "v30_lora_temp",
+  "upstream_commit": "782eec35e340c87434f7fd2e8ce8e06a11149116",
+  "origin": {
+    "repository": "https://github.com/SkychenLee/ops-repo.git",
+    "base_commit": "27b1a476a5054ffa0bef91aa24833306dbd1b76c",
+    "source_selection": "Current local working tree after alignment with vllm-ascend-ds, including the SGMV shrink DataCopyPad correction; not a clean export of base_commit.",
+    "provenance_path": "ops/ascendc/moe_lora/provenance.json",
+    "provenance_sha256": "fdf1f13a287c494bce3f7883c1aee9d9e52e769e0084729827eb65e44feb9788",
+    "original_migration": {
+      "upstream_repository": "https://github.com/vllm-project/vllm-ascend",
+      "upstream_branch": "misha",
+      "upstream_commit": "72b7912616e0e296e64f0ca0003afcc2ef7ce6bc",
+      "migration_date": "2026-10-17"
+    }
+  },
+  "namespace_mapping": {
+    "cpp_namespace": {
+      "from": "ops_repo_lora",
+      "to": "turbo_ops_lora"
+    },
+    "device_symbol_prefix": {
+      "from": "ops_repo_",
+      "to": "turbo_ops_"
+    },
+    "torch_dispatcher": {
+      "from": "ops_repo",
+      "to": "turbo_ops"
+    },
+    "extension": {
+      "from": "_lora_C",
+      "to": "_C"
+    },
+    "kernel_library": {
+      "from": "libops_repo_moe_lora_kernels.so",
+      "to": "libturbo_ops_lora_kernels.so"
+    },
+    "install_component": {
+      "from": "ops_repo_lora",
+      "to": "turbo_ops"
+    }
+  },
+  "files": [
+    {
+      "source_path": "ops/ascendc/moe_lora/add_lora_fused.cpp",
+      "source_sha256": "314f84af252dce351e15a29d502e57961e7199d67f52a50749418b773c9a38a4",
+      "destination_path": "csrc/kernels/lora/add_lora_fused.cpp",
+      "destination_sha256": "f50ce8ed5db517e4e5562ec0313a4371a5db74ab9849c6e6784fb264aa88b925",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/add_lora_fused.cpp",
+      "upstream_source_sha256": "eacc3f1ffb3b599eac2f92110a4025536d650e8a1fdb218ad7abb56cc70e57a6",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/add_lora_swiglu_quant.cpp",
+      "source_sha256": "d75d6349005450a2814e6b64873bf3bfdfaecd4068af85394714265de4e8c976",
+      "destination_path": "csrc/kernels/lora/add_lora_swiglu_quant.cpp",
+      "destination_sha256": "a928e773dd632574b6c91e64dedeaacd6acf9f18dd696daa23ea5c0230763c16",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/add_lora_swiglu_quant.cpp",
+      "upstream_source_sha256": "3cf82e72f5e31857d7f5ff1295b9b52bb9363d5953dbb2e5eea9785dc607d6d2",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/bgmv_expand.cpp",
+      "source_sha256": "df3a2660f08ed4cc9d6af6a6de267841592a526873b711eb6fd5153ca54f7ab4",
+      "destination_path": "csrc/kernels/lora/bgmv_expand.cpp",
+      "destination_sha256": "76bb74cc08196b1fc5c04bfa3bd042fac200185cf9a801e50c407546e872f140",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/bgmv_expand.cpp",
+      "upstream_source_sha256": "371c2d9c0dd60c7038479b7726d34f985b04ffa64370a4118e5b10538ae560fb",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/bgmv_shrink.cpp",
+      "source_sha256": "7eaf8a17b1feba12bf9e2401c3d25e0618a51ad64057a4e914df82ca64421491",
+      "destination_path": "csrc/kernels/lora/bgmv_shrink.cpp",
+      "destination_sha256": "83262fba8305cfa0adab16a603df4170baeb8feae87fd7f3b30407a699f514a6",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/bgmv_shrink.cpp",
+      "upstream_source_sha256": "a0ffb8c6598ed502b86b6cfc7875656c83822778bc4a0d510f665d8d3992774d",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/combined_lora_idx.cpp",
+      "source_sha256": "ecb0eda57affef00c4ccb84431f4ba26333533e17db7daa485017cd08bec1a6e",
+      "destination_path": "csrc/kernels/lora/combined_lora_idx.cpp",
+      "destination_sha256": "54771f525e0d8cf7f76c7cb4cc46666b775c7d5761a5e5ccda56f22febd69e08",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/combined_lora_idx.cpp",
+      "upstream_source_sha256": "58243fe7a9fa131a2d3421dcfa70859843696b9b2ae0149130d1aa002d4347f7",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/sgmv_expand.cpp",
+      "source_sha256": "fd038d5e971075cb4321158fb0b3281de327381bf71861b43a16f3297371c3d7",
+      "destination_path": "csrc/kernels/lora/sgmv_expand.cpp",
+      "destination_sha256": "d99bf674c75c32ec665dc988d9ba3625901905bbcbc88398a8bd63193169a3f7",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/sgmv_expand.cpp",
+      "upstream_source_sha256": "4ba99fd1fa925d783fd84a42d94dfc1e86a5af17e61d32734466ad56a36967db",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/sgmv_shrink.cpp",
+      "source_sha256": "2104dd059515d0566a1f09df5915a489df36f2429976bae44bd3f47269360e81",
+      "destination_path": "csrc/kernels/lora/sgmv_shrink.cpp",
+      "destination_sha256": "330e221119d4913c6992f8937923466c08b1011ea5df21102e77f067af13b544",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/sgmv_shrink.cpp",
+      "upstream_source_sha256": "0a07766942e0f7757b28cd5b9de0b0a44b62fa2e235df7fed18ba2171e2cc12a",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling. Synchronized DS CopyOut DataCopyPad for FP32 ranks smaller than one 32-byte DMA block."
+    },
+    {
+      "source_path": "ops/ascendc/moe_lora/types.h",
+      "source_sha256": "310b304c69c2f55edbf1a5cdce86cbdc14037cbcfe544048e9fb8d9f7dce533c",
+      "destination_path": "csrc/kernels/lora/types.h",
+      "destination_sha256": "8f41a7c1e1c3d3ed6507adfa2a4c9cd34bf1fac770df620764127010c82aaa1f",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/kernels/types.h",
+      "upstream_source_sha256": "f6592568b467b0db895e1c8ab5041544008da8ed280775b368e9afe1eaf05e2f",
+      "retained_origin_adaptations": "Rename C++ namespace to ops_repo_lora and prefix device entry points with ops_repo_; preserve kernel algorithms and tiling."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/aclnn_torch_adapter/NPUBridge.cpp",
+      "source_sha256": "07453375868d441f766b30bbb261d7fd06f828723e070b09a9ff6d305e85ee23",
+      "destination_path": "csrc/lora/aclnn_torch_adapter/NPUBridge.cpp",
+      "destination_sha256": "220c447f950c3643d8eb2ba0ceeefa5a97f9e70b007647f3022d16c81b1800a7",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/aclnn_torch_adapter/NPUBridge.cpp",
+      "upstream_source_sha256": "0584211ae839e6b7524887b8c24ca1222d5dff3d7c4609af9548e55f22fd8cf6",
+      "retained_origin_adaptations": "Rename storage bridge namespace to ops_repo_lora; retain upstream storage layout compatibility."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/aclnn_torch_adapter/NPUBridge.h",
+      "source_sha256": "958586fe5243130971b9adb1a36dd64ea8b9ff01e68652374d251833e40cc769",
+      "destination_path": "csrc/lora/aclnn_torch_adapter/NPUBridge.h",
+      "destination_sha256": "44ad2ca3521cb841a0406341e2be0a07c51fea11a6e2454e368121386f9e5f49",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/aclnn_torch_adapter/NPUBridge.h",
+      "upstream_source_sha256": "20afcbf147970f6779bbeeddcca3b1701f6b4087aa0b2b05954f5e0dbbbc691d",
+      "retained_origin_adaptations": "Rename storage bridge namespace to ops_repo_lora; retain upstream storage layout compatibility."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/aclnn_torch_adapter/NPUStorageImpl.cpp",
+      "source_sha256": "f1288b5855d25ad7d3e45b83a7e2d4970b3ae9a4fb512c4f2b4401b1a6432cad",
+      "destination_path": "csrc/lora/aclnn_torch_adapter/NPUStorageImpl.cpp",
+      "destination_sha256": "bf41d0f57cebc17570fea0cfecc98ff8d21e41e7e8d6442d2cc4a925b85691aa",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/aclnn_torch_adapter/NPUStorageImpl.cpp",
+      "upstream_source_sha256": "5adfaa3aff7f88342a6a01aa37104a9d6a9375ea6c93f795fc2d0afa6080a518",
+      "retained_origin_adaptations": "Rename storage bridge namespace to ops_repo_lora; retain upstream storage layout compatibility."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/aclnn_torch_adapter/NPUStorageImpl.h",
+      "source_sha256": "09c842bebdf0bfec60f8be7c1f2b81d34d443bb39f5111ec956e55b326d433e0",
+      "destination_path": "csrc/lora/aclnn_torch_adapter/NPUStorageImpl.h",
+      "destination_sha256": "a4eb61451bddfa96819afe8bfd4965f6b7fe376ecba91f04e02a65e8ad0a0c55",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/aclnn_torch_adapter/NPUStorageImpl.h",
+      "upstream_source_sha256": "efd9d47443a72074b774f2057923ea15144c76e12fb4f6bed98233fa3e5f30c4",
+      "retained_origin_adaptations": "Rename storage bridge namespace to ops_repo_lora; retain upstream storage layout compatibility."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/aclnn_torch_adapter/op_api_common.h",
+      "source_sha256": "4c888155b3960383e3665c2ad759c9bb0eddef6181bf2bb3a45d3ed7d1ff2390",
+      "destination_path": "csrc/lora/aclnn_torch_adapter/op_api_common.h",
+      "destination_sha256": "204753d10d6aa1c0cdf4565e793932808b1343362d27d147a988ab3b6adb768d",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/aclnn_torch_adapter/op_api_common.h",
+      "upstream_source_sha256": "cbd891c9fd8cfb3ad7212f425637772d2da60c21f0db8e106ccd5e5e5f4daac4",
+      "retained_origin_adaptations": "Keep ACLNN tensor conversion and executor behavior; isolate helpers in ops_repo_lora::aclnn; resolve only libopapi.so, removing custom vendor-library lookup."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/ops.h",
+      "source_sha256": "7c315659e1598836dcfa5c37b431b6efc5cd2db1a1b56aac49135a1ee53a6028",
+      "destination_path": "csrc/lora/ops.h",
+      "destination_sha256": "f9b3877e9bad835bfd0875e4dbe9e303c62f4d48d9c934c9dd569dc24df20103",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/ops.h",
+      "upstream_source_sha256": "a66ce0a699cc7600c4349bc752cf6c27250a7d7af63e23482484a2d5e5f8df8d",
+      "retained_origin_adaptations": "Extract the seven LoRA direct-kernel declarations; rename namespace; include migrated types.h."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/torch_binding.cpp",
+      "source_sha256": "8f5c50200aa667aec745a9436691297aaf5942d1edd5135c2e973a444c3433fa",
+      "destination_path": "csrc/lora/torch_binding.cpp",
+      "destination_sha256": "3a62ca62ac4b5f117fcb1866afec185e7c15acf452ff2410e793a5ceb6e48b5d",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/torch_binding.cpp",
+      "upstream_source_sha256": "a157f23525f6174b55763a6f0fa6d103edf9346ff1406a2210740154c9927496",
+      "retained_origin_adaptations": "Extract all ten LoRA host operators and helpers, retaining routing thresholds/fallbacks; rename namespace and dispatcher; correct bgmv/sgmv mutation/return alias annotations; add independent _lora_C module initializer."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/moe_lora/torch_binding_meta.cpp",
+      "source_sha256": "5728136cf5f73d842f2101cea871515c287af78056fec6f033999b8cb59b1c39",
+      "destination_path": "csrc/lora/torch_binding_meta.cpp",
+      "destination_sha256": "dfc0e6f3c4ea2f48c075c675dfda7dcc3e5246805d0d41829055365d30243648",
+      "changes": "Rename C++ namespace ops_repo_lora to turbo_ops_lora, device symbols ops_repo_ to turbo_ops_, dispatcher ops_repo to turbo_ops, and extension _lora_C/PyInit__lora_C to _C/PyInit__C. Preserve algorithms, tiling, contracts, adapter behavior and copyright.",
+      "upstream_source_path": "csrc/torch_binding_meta.cpp",
+      "upstream_source_sha256": "e7a64acf13e7a1ae40ba0672a3cebb8dda94940dc1b6acd608a0fb4e0bfa8970",
+      "retained_origin_adaptations": "Extract LoRA Meta implementations, use ops_repo namespace, add missing shrink Meta kernels, and preserve expand output aliasing."
+    },
+    {
+      "source_path": "torch_custom/ops_repo/csrc/CMakeLists.txt",
+      "source_sha256": "f787011ef4069f057dd0007e5874b08de4a370f259bd20308926a8f65dbe606d",
+      "destination_path": "csrc/CMakeLists.txt",
+      "destination_sha256": "b1fc502a98619bc898157db32be0acba228cf43f4530a73059fcafe890833ecf",
+      "changes": "Relocate kernel and host roots inside turbo_ops/csrc; rename extension to _C, kernel library to turbo_ops_lora_kernels, and install component to turbo_ops. Preserve CANN discovery, A2/A3 restriction, C++17, linkage and $ORIGIN RPATH."
+    }
+  ]
+}

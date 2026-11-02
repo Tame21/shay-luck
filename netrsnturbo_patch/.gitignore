@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+netrsn_turbo/turbo_ops/_C*.so
+netrsn_turbo/turbo_ops/_C*.pyd
+netrsn_turbo/turbo_ops/libturbo_ops_lora_kernels.so
+netrsn_turbo/turbo_ops/_build_info.json
