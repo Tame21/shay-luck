@@ -23,6 +23,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_DIR = ROOT / "netrsn_turbo/turbo/version_0300/ds_lora"
 TEST_PACKAGE = "_ds_lora_installer_under_test"
+OVERLAP_ENV = "VLLM_ASCEND_LORA_MOE_OVERLAP"
 
 
 def load_installer():
@@ -123,8 +124,8 @@ class InstallerTests(unittest.TestCase):
         consumer = module("_consumer_ds_lora", imported_calculate=old)
         sys.modules[source.__name__] = source
         sys.modules[consumer.__name__] = consumer
-        self.payload("sample", calculate=new)
-        self.specs(((source.__name__, "sample", ("calculate",), ()),))
+        self.payload(source.__name__, calculate=new)
+        self.specs(((source.__name__, source.__name__, ("calculate",), ()),))
 
         hook = installer.apply_lora_patch()
 
@@ -140,8 +141,8 @@ class InstallerTests(unittest.TestCase):
         def replacement():
             return "patched"
 
-        self.payload("deferred", calculate=replacement)
-        self.specs(((target, "deferred", ("calculate",), ()),))
+        self.payload(target, calculate=replacement)
+        self.specs(((target, target, ("calculate",), ()),))
 
         class ExistingLoader(importlib.abc.Loader):
             def create_module(self, spec):
@@ -177,8 +178,8 @@ class InstallerTests(unittest.TestCase):
     def test_repeated_install_and_module_callback_are_idempotent(self):
         source = module("_once_ds_lora", calculate=lambda: "original")
         sys.modules[source.__name__] = source
-        self.payload("once", calculate=lambda: "replacement")
-        self.specs(((source.__name__, "once", ("calculate",), ()),))
+        self.payload(source.__name__, calculate=lambda: "replacement")
+        self.specs(((source.__name__, source.__name__, ("calculate",), ()),))
         first = installer.apply_lora_patch()
         original_apply_count = self.manager.apply_count
 
@@ -199,8 +200,8 @@ class InstallerTests(unittest.TestCase):
         sys.modules[target.__name__] = target
         sys.modules[witness.__name__] = witness
         helper = lambda: "helper"
-        self.payload("additions", helper=helper, prefixes=["mtp."])
-        self.specs(((target.__name__, "additions", (), ("helper", "Model.prefixes")),))
+        self.payload(target.__name__, helper=helper, prefixes=["mtp."])
+        self.specs(((target.__name__, target.__name__, (), ("helper", "Model.prefixes")),))
 
         installer.apply_lora_patch()
 
@@ -226,8 +227,8 @@ class InstallerTests(unittest.TestCase):
         sys.modules[target.__name__] = target
         sys.modules[witness.__name__] = witness
         mapper = object()
-        self.payload("inherited", lora_skip_prefixes=["mtp."], hf_to_vllm_mapper=mapper)
-        self.specs(((target.__name__, "inherited", (), (
+        self.payload(target.__name__, lora_skip_prefixes=["mtp."], hf_to_vllm_mapper=mapper)
+        self.specs(((target.__name__, target.__name__, (), (
             "DeepSeek.lora_skip_prefixes", "DeepSeek.hf_to_vllm_mapper"
         )),))
 
@@ -257,14 +258,14 @@ class InstallerTests(unittest.TestCase):
         other = Implementation(lambda: "other", None)
         original = Implementation(original_apply, validator)
         target = module(
-            "_quant_ds_lora",
+            "vllm_ascend.lora.quant_moe",
             QuantType=quant_type,
             _QUANT_MOE_LORA_IMPLS={"int8": original, "other": other},
             _apply_dynamic_int8_moe_lora=original_apply,
         )
         sys.modules[target.__name__] = target
-        self.payload("quant_moe", _apply_dynamic_int8_moe_lora=replacement)
-        self.specs(((target.__name__, "quant_moe", ("_apply_dynamic_int8_moe_lora",), ()),))
+        self.payload(target.__name__, _apply_dynamic_int8_moe_lora=replacement)
+        self.specs(((target.__name__, target.__name__, ("_apply_dynamic_int8_moe_lora",), ()),))
 
         installer.apply_lora_patch()
 
@@ -275,12 +276,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIs(original.apply, original_apply)
 
     def test_combined_index_is_added_to_original_reset_lifecycle(self):
-        target = module("_fused_ds_lora", _MOE_LORA_INDEX_FIELDS=("split_lora_indices",))
+        target = module("vllm_ascend.lora.fused_moe", _MOE_LORA_INDEX_FIELDS=("split_lora_indices",))
         exec("def reset(ctx):\n    for name in _MOE_LORA_INDEX_FIELDS:\n"
              "        if hasattr(ctx, name):\n            delattr(ctx, name)\n", vars(target))
         sys.modules[target.__name__] = target
-        self.payload("fused_moe")
-        self.specs(((target.__name__, "fused_moe", (), ()),))
+        self.payload(target.__name__)
+        self.specs(((target.__name__, target.__name__, (), ()),))
         reset = target.reset
         installer.apply_lora_patch()
         context = types.SimpleNamespace(split_lora_indices=1, combined_lora_idx=2)
@@ -329,15 +330,15 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(envs.EXISTING_SETTING, "original")
             os.environ["EXISTING_SETTING"] = "updated"
             self.assertEqual(envs.EXISTING_SETTING, "updated")
-            self.assertFalse(getattr(envs, installer._OVERLAP_ENV))
-            os.environ[installer._OVERLAP_ENV] = "1"
-            self.assertTrue(getattr(envs, installer._OVERLAP_ENV))
-            os.environ[installer._OVERLAP_ENV] = "0"
-            self.assertFalse(getattr(envs, installer._OVERLAP_ENV))
-            os.environ[installer._OVERLAP_ENV] = "yes"
+            self.assertFalse(getattr(envs, OVERLAP_ENV))
+            os.environ[OVERLAP_ENV] = "1"
+            self.assertTrue(getattr(envs, OVERLAP_ENV))
+            os.environ[OVERLAP_ENV] = "0"
+            self.assertFalse(getattr(envs, OVERLAP_ENV))
+            os.environ[OVERLAP_ENV] = "yes"
             with self.assertRaisesRegex(ValueError, "either '0' or '1'"):
-                getattr(envs, installer._OVERLAP_ENV)
-        self.assertEqual(parser_calls, [installer._OVERLAP_ENV] * 4)
+                getattr(envs, OVERLAP_ENV)
+        self.assertEqual(parser_calls, [OVERLAP_ENV] * 4)
 
     def test_wrong_version_fails_before_installing_hook(self):
         self.specs(())
@@ -354,7 +355,7 @@ class InstallerTests(unittest.TestCase):
         target.__spec__ = importlib.util.spec_from_loader(target.__name__, loader=None)
         target.__spec__._initializing = True
         sys.modules[target.__name__] = target
-        self.specs(((target.__name__, "unneeded_payload", ("calculate",), ()),))
+        self.specs(((target.__name__, target.__name__, ("calculate",), ()),))
         before = list(sys.meta_path)
 
         with self.assertRaisesRegex(RuntimeError, "modules still initializing") as raised:
@@ -395,8 +396,8 @@ class InstallerTests(unittest.TestCase):
         original = lambda: None
         source = module("_bad_baseline_ds_lora", present=original)
         sys.modules[source.__name__] = source
-        self.payload("bad", present=lambda: "new", missing=lambda: "new")
-        self.specs(((source.__name__, "bad", ("present", "missing"), ()),))
+        self.payload(source.__name__, present=lambda: "new", missing=lambda: "new")
+        self.specs(((source.__name__, source.__name__, ("present", "missing"), ()),))
         before = list(sys.meta_path)
 
         with self.assertRaisesRegex(RuntimeError, "baseline mismatch"):

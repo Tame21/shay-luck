@@ -30,11 +30,32 @@ netrsn_turbo/
     csrc/lora/                  Host、Meta、ACLNN adapter
     provenance.json / LICENSE  来源、规范化 SHA256 和许可
   turbo/version_0300/ds_lora/   DS LoRA Python 补丁及接口适配
+    __init__.py / installer.py / manifest.py
+    vllm_ascend/
+      ascend_forward_context.py
+      envs.py
+      lora/
+        fused_moe.py
+        punica_npu.py
+        quant_moe.py
+        lora_ops.py / ops_backend.py
+      ops/fused_moe/
+        routed_experts.py
+        token_dispatcher.py
+      models/deepseek_v4/
+        model.py
   turbo_manager/version_0300/  TurboManager 接入入口
 build_support/turbo_ops.py
 setup_turbo_ops.py             独立构建验证入口
 tests/                        无硬件测试及可选 NPU 回归
 ```
+
+`ds_lora` 下的补丁文件与上游 Python 模块路径对应，例如
+`vllm_ascend/lora/punica_npu.py`、`vllm_ascend/models/deepseek_v4/model.py`。
+`installer.py` / `manifest.py` 保留为公共安装入口和补丁清单；`lora/ops_backend.py`
+是内部 `turbo_ops` 的连接层。当前补丁目标全部属于 `vllm_ascend`，因此没有空的
+`vllm/` 目录。各级 `__init__.py` 不提前加载算子或模型，原 `apply_lora_patch()`
+导入路径不变。
 
 公开接口：`bgmv_shrink`、`bgmv_expand`、`sgmv_shrink`、`sgmv_expand`、
 `build_combined_lora_idx`、`add_lora`、`add_lora_shrink`、`add_lora_expand`、
@@ -143,7 +164,7 @@ TURBO_OPS_RUN_NPU_TESTS=1 TURBO_OPS_TEST_DEVICE=npu:0 \
 硬件用例包含数值参考、窄 rank 写回、LoRA slot 更新、图回放及 fully-sharded / EP
 局部算子路径；这些测试不能替代真实多卡 vLLM 0.30 模型验证。
 本次开发环境为 Windows，没有 torch / CANN / NPU，因此未执行原生编译或 NPU 测试。
-本地已通过 **71 项无硬件测试**，包含实际 setuptools wheel / sdist 内容检查及
+本地已通过 **74 项无硬件测试**，包含目录映射与真实延迟导入、setuptools wheel / sdist 内容检查及
 native → pure 重建残留检查；打包测试中的原生文件为合成样本，仅验证分发机制。
 
 源码固定于 DS `v30_lora_temp` 提交 `782eec35e340c87434f7fd2e8ce8e06a11149116`，

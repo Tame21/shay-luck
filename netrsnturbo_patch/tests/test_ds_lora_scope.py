@@ -38,7 +38,8 @@ def definitions(tree):
 class ScopeTests(unittest.TestCase):
     def test_every_registered_payload_symbol_exists(self):
         for _, payload_name, existing, additions in MANIFEST["PATCH_SPECS"]:
-            tree = ast.parse((PAYLOAD / f"{payload_name}.py").read_text(encoding="utf-8"))
+            source = PAYLOAD.joinpath(*payload_name.split(".")).with_suffix(".py")
+            tree = ast.parse(source.read_text(encoding="utf-8"))
             exported = set(definitions(tree))
             exported.update(
                 target.id
@@ -112,7 +113,7 @@ class CommunicationTests(unittest.TestCase):
             "_MOE_COMM_SELECTORS": {"mc2": lambda *args: Comm.MC2},
             "logger": types.SimpleNamespace(debug=lambda *args: None),
         }
-        source = PAYLOAD / "forward_context.py"
+        source = PAYLOAD / "vllm_ascend/ascend_forward_context.py"
         node = definitions(ast.parse(source.read_text(encoding="utf-8")))["select_moe_comm_method"]
         future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
         isolated = ast.fix_missing_locations(ast.Module(body=[future, node], type_ignores=[]))
@@ -151,7 +152,7 @@ class MapperTests(unittest.TestCase):
             "logger": types.SimpleNamespace(warning_once=lambda *args: None),
         }
         exec(compile(isolated, str(source), "exec"), namespace)
-        model_source = PAYLOAD / "model.py"
+        model_source = PAYLOAD / "vllm_ascend/models/deepseek_v4/model.py"
         payload_tree = ast.parse(model_source.read_text(encoding="utf-8"))
         payload_tree.body = [n for n in payload_tree.body if not isinstance(n, ast.ImportFrom)]
         exec(compile(payload_tree, str(model_source), "exec"), namespace)

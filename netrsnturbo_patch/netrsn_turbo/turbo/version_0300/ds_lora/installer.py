@@ -16,10 +16,10 @@ from dataclasses import replace
 from functools import wraps
 
 from .manifest import PATCH_SPECS
-from .ops_backend import initialize_lora_backend
+from .vllm_ascend.envs import OVERLAP_ENV as _OVERLAP_ENV, apply_env_patch
+from .vllm_ascend.lora.ops_backend import initialize_lora_backend
 
 _ENV_MODULE = "vllm_ascend.envs"
-_OVERLAP_ENV = "VLLM_ASCEND_LORA_MOE_OVERLAP"
 _HOOK_ID = "netrsn_turbo.ds_lora.version_0300"
 
 
@@ -101,10 +101,7 @@ class _PatchFinder(importlib.abc.MetaPathFinder):
         self.in_progress.add(name)
         try:
             if name == _ENV_MODULE:
-                # Same strict 0/1 parser and lazy evaluation as Ascend envs.
-                module.env_variables.setdefault(
-                    _OVERLAP_ENV, lambda: module._strict_binary_env(_OVERLAP_ENV)
-                )
+                apply_env_patch(module)
             else:
                 self._apply_spec(module, self.specs[name])
             self.applied[name] = module
@@ -126,7 +123,7 @@ class _PatchFinder(importlib.abc.MetaPathFinder):
                 value = _checked_init(value)
             targets.append((path, owner, attribute, value))
 
-        if payload_name == "fused_moe":
+        if module.__name__ == "vllm_ascend.lora.fused_moe":
             # reset_lora_indices is unchanged but reads this original constant.
             fields = module._MOE_LORA_INDEX_FIELDS
             if "combined_lora_idx" not in fields:
@@ -141,7 +138,7 @@ class _PatchFinder(importlib.abc.MetaPathFinder):
                 self.manager.register_patch(f"{module.__name__}.{path}", value)
         self.manager.apply_patches()
 
-        if payload_name == "quant_moe":
+        if module.__name__ == "vllm_ascend.lora.quant_moe":
             # TurboManager propagates module globals, not references inside
             # frozen dataclasses stored in dictionaries. Preserve validators
             # and all other quantization entries while replacing W8A8's apply.

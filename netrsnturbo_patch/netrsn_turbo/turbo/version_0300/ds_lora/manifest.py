@@ -11,18 +11,19 @@ and DeepSeek load_weights' unrelated loaded-parameter bookkeeping fix.
 """
 
 # Each tuple is (upstream module, payload module, existing attributes, additions).
+# Payload names are relative to ds_lora and mirror the upstream package path.
 # Additions use setattr: a TurboManager implementation may require an original
 # attribute to exist before it can propagate replacements by object identity.
 PATCH_SPECS = (
     (
         "vllm_ascend.ascend_forward_context",
-        "forward_context",
+        "vllm_ascend.ascend_forward_context",
         ("select_moe_comm_method",),
         (),
     ),
     (
         "vllm_ascend.lora.punica_npu",
-        "punica_npu",
+        "vllm_ascend.lora.punica_npu",
         (
             "PunicaWrapperNPU.__init__",
             "PunicaWrapperNPU.update_metadata",
@@ -37,7 +38,7 @@ PATCH_SPECS = (
     ),
     (
         "vllm_ascend.lora.fused_moe",
-        "fused_moe",
+        "vllm_ascend.lora.fused_moe",
         (
             "preprocess_lora_indices",
             "postprocess_lora_indices",
@@ -54,7 +55,7 @@ PATCH_SPECS = (
     ),
     (
         "vllm_ascend.lora.quant_moe",
-        "quant_moe",
+        "vllm_ascend.lora.quant_moe",
         ("_apply_dynamic_int8_moe_lora",),
         (
             "_lora_aux_stream",
@@ -67,7 +68,7 @@ PATCH_SPECS = (
     ),
     (
         "vllm_ascend.ops.fused_moe.routed_experts",
-        "routed_experts",
+        "vllm_ascend.ops.fused_moe.routed_experts",
         (
             "AscendUnquantizedFusedMoEMethod.apply_gmm1",
             "AscendUnquantizedFusedMoEMethod.apply_gmm2",
@@ -76,13 +77,13 @@ PATCH_SPECS = (
     ),
     (
         "vllm_ascend.ops.fused_moe.token_dispatcher",
-        "token_dispatcher",
+        "vllm_ascend.ops.fused_moe.token_dispatcher",
         ("TokenDispatcherWithAll2AllV.token_dispatch",),
         (),
     ),
     (
         "vllm_ascend.models.deepseek_v4.model",
-        "model",
+        "vllm_ascend.models.deepseek_v4.model",
         (),
         (
             "AscendDeepseekV4ForCausalLM.lora_skip_prefixes",

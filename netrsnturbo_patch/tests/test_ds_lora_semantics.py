@@ -139,7 +139,7 @@ class FullyShardedW2Tests(unittest.TestCase):
                         backend = types.SimpleNamespace(add_lora_shrink=shrink, add_lora_expand=expand)
                         torch = fake_torch()
                         apply = load_functions(
-                            "punica_npu.py", {"add_lora_fused_moe"}, torch=torch,
+                            "vllm_ascend/lora/punica_npu.py", {"add_lora_fused_moe"}, torch=torch,
                             get_lora_ops=lambda: backend,
                             ENABLE_ADD_LORA_KERNEL=True,
                             get_tensor_model_parallel_world_size=lambda: 2,
@@ -173,7 +173,7 @@ class FullyShardedW2Tests(unittest.TestCase):
             punica_wrapper=types.SimpleNamespace(add_lora_fused_moe=lambda **kwargs: calls.append(kwargs)),
         )
         reset = []
-        apply = load_functions("fused_moe.py", {"moe_lora_apply_w2"}, reset_lora_indices=reset.append)[
+        apply = load_functions("vllm_ascend/lora/fused_moe.py", {"moe_lora_apply_w2"}, reset_lora_indices=reset.append)[
             "moe_lora_apply_w2"
         ]
         apply(context, down_out=Tensor([0, 0], (1, 2)), silu_out=Tensor([3], (1, 1)), lora_routing=None)
@@ -234,7 +234,7 @@ class FullyShardedW2Tests(unittest.TestCase):
         module = types.ModuleType("vllm_ascend.lora.fused_moe")
         module._build_combined_lora_idx_allgather = lambda *args: Tensor([0], (1,))
         run = load_functions(
-            "quant_moe.py", {"_apply_dynamic_int8_moe_lora_overlap_phase"}, torch=torch,
+            "vllm_ascend/lora/quant_moe.py", {"_apply_dynamic_int8_moe_lora_overlap_phase"}, torch=torch,
             _lora_aux_stream=lambda: Stream("aux"),
             DeviceOperator=types.SimpleNamespace(
                 npu_dynamic_quant=lambda **kwargs: (kwargs["hidden_states"], Tensor([1], (1,))),
@@ -280,7 +280,7 @@ class AllToAllSlotTests(unittest.TestCase):
         module = types.ModuleType("vllm_ascend.lora.fused_moe")
         module.all2all_lora_indices = fallback
         namespace = load_functions(
-            "token_dispatcher.py", {"_can_pack_lora_slots", "token_dispatch"}, torch=fake_torch(),
+            "vllm_ascend/ops/fused_moe/token_dispatcher.py", {"_can_pack_lora_slots", "token_dispatch"}, torch=fake_torch(),
             has_lora=lambda value: value is not None, async_all_to_all=exchange,
             MoETokenDispatchOutput=types.SimpleNamespace, MoEAllToAllCombineMetadata=types.SimpleNamespace,
         )

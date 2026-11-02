@@ -13,13 +13,15 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD = ROOT / "netrsn_turbo/turbo/version_0300/ds_lora"
+LORA_PAYLOAD = PAYLOAD / "vllm_ascend/lora"
 PACKAGE = "_turbo_ops_integration_fixture"
+LORA_PACKAGE = PACKAGE + ".vllm_ascend.lora"
 
 
 def load_backend():
-    module = types.ModuleType(PACKAGE + ".ops_backend")
-    module.__package__ = PACKAGE
-    source = PAYLOAD / "ops_backend.py"
+    module = types.ModuleType(LORA_PACKAGE + ".ops_backend")
+    module.__package__ = LORA_PACKAGE
+    source = LORA_PAYLOAD / "ops_backend.py"
     exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
     return module
 
@@ -106,12 +108,15 @@ class DenseAdapterTests(unittest.TestCase):
         helper = load_backend()
         self.backend = fake_backend(helper)
         helper.get_lora_ops = mock.Mock(return_value=self.backend)
-        package = types.ModuleType(PACKAGE)
-        package.__path__ = []
-        self.module = types.ModuleType(PACKAGE + ".lora_ops")
-        self.module.__package__ = PACKAGE
-        source = PAYLOAD / "lora_ops.py"
-        with mock.patch.dict(sys.modules, {PACKAGE: package, helper.__name__: helper}):
+        packages = {}
+        for name in (PACKAGE, PACKAGE + ".vllm_ascend", LORA_PACKAGE):
+            package = types.ModuleType(name)
+            package.__path__ = []
+            packages[name] = package
+        self.module = types.ModuleType(LORA_PACKAGE + ".lora_ops")
+        self.module.__package__ = LORA_PACKAGE
+        source = LORA_PAYLOAD / "lora_ops.py"
+        with mock.patch.dict(sys.modules, {**packages, helper.__name__: helper}):
             exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), self.module.__dict__)
 
     def test_bgmv_signatures_and_argument_order(self):
@@ -177,7 +182,7 @@ class IntegrationScopeTests(unittest.TestCase):
                     "add_lora_expand_delta", "add_lora_swiglu_quant"}
         calls = set()
         for name in ("fused_moe.py", "punica_npu.py", "quant_moe.py"):
-            tree = ast.parse((PAYLOAD / name).read_text(encoding="utf-8"))
+            tree = ast.parse((LORA_PAYLOAD / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Attribute):
                     self.assertNotEqual(ast.unparse(node), "torch.ops._C_ascend")
@@ -187,7 +192,7 @@ class IntegrationScopeTests(unittest.TestCase):
         self.assertEqual(calls, expected)
 
     def test_no_external_ops_repo_runtime_imports(self):
-        for path in PAYLOAD.glob("*.py"):
+        for path in PAYLOAD.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -199,7 +204,7 @@ class IntegrationScopeTests(unittest.TestCase):
                         self.assertNotEqual(node.args[0].value.split(".")[0], "ops_repo")
 
     def test_punica_native_branch_uses_adapters_and_keeps_torch_fallback(self):
-        tree = ast.parse((PAYLOAD / "punica_npu.py").read_text(encoding="utf-8"))
+        tree = ast.parse((LORA_PAYLOAD / "punica_npu.py").read_text(encoding="utf-8"))
         initializer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
         selection = next(n for n in initializer.body
                          if isinstance(n, ast.If) and "LORA_CUSTOM_OPS" in ast.unparse(n.test))
