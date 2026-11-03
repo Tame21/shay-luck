@@ -1,26 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Install DS LoRA through TurboManager, including modules imported later.
-
-No NPU module is eagerly imported here. In particular, importing a duplicate
-quant_moe module with its registration decorator would create another registry,
-and eager model imports would break Ascend's worker initialization order.
-"""
+"""Explicit DS LoRA registrations for NetrsnTurbo's version_0300 entry."""
 
 from __future__ import annotations
 
-import importlib
-import importlib.abc
-import re
-import sys
 from dataclasses import replace
 from functools import wraps
 
-from .manifest import PATCH_FACTORIES, PATCH_SPECS
-from .vllm_ascend.envs import OVERLAP_ENV as _OVERLAP_ENV, apply_env_patch
+from .vllm_ascend.envs import apply_env_patch
 from .vllm_ascend.lora.ops_backend import initialize_lora_backend
-
-_ENV_MODULE = "vllm_ascend.envs"
-_HOOK_ID = "netrsn_turbo.ds_lora.version_0300"
 
 
 def check_custom_ops():
@@ -37,160 +24,143 @@ def _checked_init(initializer):
     return initialize
 
 
-def _resolve_owner(module, path):
-    parts = path.split(".")
-    owner = module
-    for part in parts[:-1]:
-        owner = getattr(owner, part)
-    return owner, parts[-1]
-
-
-class _PatchLoader(importlib.abc.Loader):
-    def __init__(self, loader, hook):
-        self.loader = loader
-        self.hook = hook
-
-    def create_module(self, spec):
-        create = getattr(self.loader, "create_module", None)
-        return create(spec) if create is not None else None
-
-    def exec_module(self, module):
-        self.loader.exec_module(module)
-        self.hook.patch_module(module)
-
-    def __getattr__(self, name):
-        # Preserve source/code/resource access used by other import hooks.
-        return getattr(self.loader, name)
-
-
-class _PatchFinder(importlib.abc.MetaPathFinder):
-    hook_id = _HOOK_ID
-
-    def __init__(self, manager):
-        self.manager = manager
-        self.specs = {spec[0]: spec for spec in PATCH_SPECS}
-        self.applied = {}
-        self.in_progress = set()
-
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname not in self.specs and fullname != _ENV_MODULE:
-            return None
-        # Delegate to the existing finder chain, including NetrsnTurbo AST
-        # hooks. Calling PathFinder directly would bypass those hooks.
-        after_self = False
-        for finder in tuple(sys.meta_path):
-            if finder is self:
-                after_self = True
-                continue
-            if not after_self:
-                continue
-            find_spec = getattr(finder, "find_spec", None)
-            if find_spec is None:
-                continue
-            spec = find_spec(fullname, path, target)
-            if spec is not None:
-                if spec.loader is not None and hasattr(spec.loader, "exec_module"):
-                    spec.loader = _PatchLoader(spec.loader, self)
-                return spec
-        return None
-
-    def patch_module(self, module):
-        name = module.__name__
-        if self.applied.get(name) is module or name in self.in_progress:
-            return
-        self.in_progress.add(name)
-        try:
-            if name == _ENV_MODULE:
-                apply_env_patch(module)
-            else:
-                self._apply_spec(module, self.specs[name])
-            self.applied[name] = module
-        finally:
-            self.in_progress.remove(name)
-
-    def _apply_spec(self, module, spec):
-        _, payload_name, existing, additions = spec
-        payload = importlib.import_module(f"{__package__}.{payload_name}")
-        # Resolve and validate everything before changing attributes. Do not
-        # fabricate missing classes/functions on an incompatible Ascend build.
-        targets = []
-        for path in existing + additions:
-            owner, attribute = _resolve_owner(module, path)
-            if path in existing and not hasattr(owner, attribute):
-                raise RuntimeError(f"DS LoRA baseline mismatch: missing {module.__name__}.{path}")
-            value = getattr(payload, attribute)
-            if f"{module.__name__}.{path}" in PATCH_FACTORIES:
-                value = value(getattr(owner, attribute))
-            if path == "PunicaWrapperNPU.__init__":
-                value = _checked_init(value)
-            targets.append((path, owner, attribute, value))
-
-        if module.__name__ == "vllm_ascend.lora.fused_moe":
-            # reset_lora_indices is unchanged but reads this original constant.
-            fields = module._MOE_LORA_INDEX_FIELDS
-            if "combined_lora_idx" not in fields:
-                module._MOE_LORA_INDEX_FIELDS = (*fields, "combined_lora_idx")
-        for path, owner, attribute, value in targets:
-            if path in additions:
-                # Class additions can inherit a shared default (for example
-                # SupportsLoRA.lora_skip_prefixes=[]). Never propagate such
-                # a default, or None, into unrelated modules/classes.
-                setattr(owner, attribute, value)
-            else:
-                self.manager.register_patch(f"{module.__name__}.{path}", value)
-        self.manager.apply_patches()
-
-        if module.__name__ == "vllm_ascend.lora.quant_moe":
-            # TurboManager propagates module globals, not references inside
-            # frozen dataclasses stored in dictionaries. Preserve validators
-            # and all other quantization entries while replacing W8A8's apply.
-            key = module.QuantType.W8A8
-            original = module._QUANT_MOE_LORA_IMPLS[key]
-            module._QUANT_MOE_LORA_IMPLS[key] = replace(
-                original, apply=payload._apply_dynamic_int8_moe_lora
-            )
-
-
 def apply_lora_patch():
-    """Idempotently install for vLLM 0.30.x in the current process.
+    """Register and apply DS LoRA in Netrsn's existing LoRA startup branch.
 
-    Call again in each spawn worker through NetrsnCore's special_init.py import
-    path. Importing a parent process's modules does not patch another process.
-    Returns the finder, useful for inspecting which modules have been patched.
+    Netrsn owns version dispatch, import ordering and duplicate registration.
+    Its spawn-worker entry must call this in each worker process as usual.
     """
-    import vllm
     from netrsn_turbo.turbo_manager.turbo_utils import TurboManager
+    from vllm_ascend import envs
+    from vllm_ascend.lora import fused_moe, punica_npu, quant_moe
+    from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-    if re.match(r"^0\.30\.", vllm.__version__) is None:
-        raise RuntimeError(
-            f"version_0300 DS LoRA targets vLLM 0.30.x, got {vllm.__version__!r}"
-        )
-    for finder in sys.meta_path:
-        if getattr(finder, "hook_id", None) == _HOOK_ID:
-            return finder
-    names = (_ENV_MODULE, *(spec[0] for spec in PATCH_SPECS))
-    initializing = [
-        name
-        for name in names
-        if getattr(getattr(sys.modules.get(name), "__spec__", None), "_initializing", False)
-    ]
-    if initializing:
-        # These loaders were selected before this hook existed, so their
-        # completion cannot be intercepted retroactively. Fail instead of
-        # silently leaving a partially patched process.
-        raise RuntimeError(
-            "Install DS LoRA after framework imports finish; modules still initializing: "
-            + ", ".join(initializing)
-        )
-    finder = _PatchFinder(TurboManager)
-    sys.meta_path.insert(0, finder)
-    try:
-        # Patch already imported modules as well as future imports.
-        for name in names:
-            module = sys.modules.get(name)
-            if module is not None:
-                finder.patch_module(module)
-    except Exception:
-        sys.meta_path.remove(finder)
-        raise
-    return finder
+    from .vllm_ascend import ascend_forward_context as forward_patch
+    from .vllm_ascend.lora import fused_moe as fused_patch
+    from .vllm_ascend.lora import punica_npu as punica_patch
+    from .vllm_ascend.lora import quant_moe as quant_patch
+    from .vllm_ascend.models.deepseek_v4 import model as model_patch
+    from .vllm_ascend.ops.fused_moe import routed_experts as routed_patch
+    from .vllm_ascend.ops.fused_moe import token_dispatcher as dispatcher_patch
+    from .vllm_ascend.worker import model_runner_v1 as worker_patch
+
+    # This payload is a factory: retain the loaded method's body and globals.
+    dummy_run = worker_patch._dummy_run(NPUModelRunner._dummy_run)
+
+    # New attributes have no original implementation to replace or propagate.
+    punica_npu.build_combined_lora_idx = punica_patch.build_combined_lora_idx
+    punica_npu.PunicaWrapperNPU.add_lora = punica_patch.add_lora
+
+    fused_moe._gather_by_row_permutation = fused_patch._gather_by_row_permutation
+    fused_moe._build_combined_lora_idx_allgather = fused_patch._build_combined_lora_idx_allgather
+    fused_moe._build_combined_lora_idx_allgather_torch = fused_patch._build_combined_lora_idx_allgather_torch
+
+    quant_moe._lora_aux_stream = quant_patch._lora_aux_stream
+    quant_moe._lora_delta_buffer = quant_patch._lora_delta_buffer
+    quant_moe._lora_overlap_eligible = quant_patch._lora_overlap_eligible
+    quant_moe._fused_w13_epilogue_eligible = quant_patch._fused_w13_epilogue_eligible
+    quant_moe._apply_dynamic_int8_moe_lora_overlap_delta = quant_patch._apply_dynamic_int8_moe_lora_overlap_delta
+    quant_moe._apply_dynamic_int8_moe_lora_overlap_phase = quant_patch._apply_dynamic_int8_moe_lora_overlap_phase
+
+    AscendDeepseekV4ForCausalLM.lora_skip_prefixes = model_patch.lora_skip_prefixes
+    AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper = model_patch.hf_to_vllm_mapper
+
+    apply_env_patch(envs)
+    # The unchanged upstream reset_lora_indices reads this tuple.
+    fused_moe._MOE_LORA_INDEX_FIELDS = (*fused_moe._MOE_LORA_INDEX_FIELDS, "combined_lora_idx")
+
+    TurboManager.register_patch(
+        "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+        forward_patch.select_moe_comm_method,
+    )
+
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.__init__",
+        _checked_init(punica_patch.__init__),
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.update_metadata",
+        punica_patch.update_metadata,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_shrink",
+        punica_patch.add_shrink,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_expand",
+        punica_patch.add_expand,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_lora_embedding",
+        punica_patch.add_lora_embedding,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_lora_linear",
+        punica_patch.add_lora_linear,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_lora_fused_moe",
+        punica_patch.add_lora_fused_moe,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.add_lora_logits",
+        punica_patch.add_lora_logits,
+    )
+
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe.preprocess_lora_indices",
+        fused_patch.preprocess_lora_indices,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe.postprocess_lora_indices",
+        fused_patch.postprocess_lora_indices,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_allgather",
+        fused_patch._recover_moe_lora_routing_allgather,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe._recover_moe_lora_routing_all2all",
+        fused_patch._recover_moe_lora_routing_all2all,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe.moe_lora_apply_w13",
+        fused_patch.moe_lora_apply_w13,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.lora.fused_moe.moe_lora_apply_w2",
+        fused_patch.moe_lora_apply_w2,
+    )
+
+    TurboManager.register_patch(
+        "vllm_ascend.lora.quant_moe._apply_dynamic_int8_moe_lora",
+        quant_patch._apply_dynamic_int8_moe_lora,
+    )
+
+    TurboManager.register_patch(
+        "vllm_ascend.ops.fused_moe.routed_experts.AscendUnquantizedFusedMoEMethod.apply_gmm1",
+        routed_patch.apply_gmm1,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.ops.fused_moe.routed_experts.AscendUnquantizedFusedMoEMethod.apply_gmm2",
+        routed_patch.apply_gmm2,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.TokenDispatcherWithAll2AllV.token_dispatch",
+        dispatcher_patch.token_dispatch,
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run",
+        dummy_run,
+    )
+
+    TurboManager.apply_patches()
+
+    # Module-global propagation does not update a frozen dataclass in a dict.
+    # Preserve the W8A8 validator and other fields while replacing its callable.
+    key = quant_moe.QuantType.W8A8
+    quant_moe._QUANT_MOE_LORA_IMPLS[key] = replace(
+        quant_moe._QUANT_MOE_LORA_IMPLS[key],
+        apply=quant_patch._apply_dynamic_int8_moe_lora,
+    )

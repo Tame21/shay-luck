@@ -17,6 +17,10 @@ Version is packaging.version.Version. The normal startup order remains:
 vllm -> vllm_ascend -> netrsn_turbo.turbo_manager. NetrsnCore special_init.py
 must repeat that import in spawn workers, as described in patch_mesim.md.
 
+apply_lora_patch explicitly registers replacements and applies them once.
+Netrsn owns version selection, import ordering and duplicate registration;
+this entry does not install an import hook or track module state.
+
 ADAPTATION_PKG_ID follows the documented early LoRA gate. For deployments
 whose LoRA flag is provided by GlobalContext instead, call apply_lora_patch()
 explicitly in that existing LoRA branch before constructing the engine.

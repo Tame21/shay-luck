@@ -10,6 +10,7 @@ Excluded: C++/build/docs changes, DSpark's quantization-only name mapper,
 and DeepSeek load_weights' unrelated loaded-parameter bookkeeping fix.
 """
 
+# Audit inventory; installer.py spells out the actual registrations explicitly.
 # Each tuple is (upstream module, payload module, existing attributes, additions).
 # Payload names are relative to ds_lora and mirror the upstream package path.
 # Additions use setattr: a TurboManager implementation may require an original
@@ -103,12 +104,3 @@ PATCH_SPECS = (
 PATCH_FACTORIES = frozenset({
     "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run",
 })
-
-REQUIRED_CUSTOM_OPS = (
-    "add_lora",
-    "add_lora_shrink",
-    "add_lora_expand",
-    "add_lora_expand_delta",
-    "add_lora_swiglu_quant",
-    "build_combined_lora_idx",
-)

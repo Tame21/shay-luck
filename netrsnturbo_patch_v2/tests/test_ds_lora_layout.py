@@ -74,7 +74,6 @@ class LayoutTests(unittest.TestCase):
             assert adapters.get_lora_ops is backend_helper.get_lora_ops
             assert backend_helper._BACKEND is None
             assert 'netrsn_turbo.turbo_ops' not in sys.modules
-            assert not any(getattr(f, 'hook_id', None) == installer._HOOK_ID for f in sys.meta_path)
 
             parse_calls = []
             upstream_env = types.SimpleNamespace(env_variables={}, _strict_binary_env=lambda key: parse_calls.append(key))
@@ -100,24 +99,21 @@ class LayoutTests(unittest.TestCase):
             assert backend_helper._BACKEND is backend
         ''')
 
-    def test_deferred_upstream_model_loads_the_real_mirrored_payload(self):
+    def test_real_model_payload_import_has_no_patch_or_native_side_effects(self):
         self.run_program('''
             import importlib
             import importlib.abc
-            import importlib.util
             import sys
             import types
 
-            prefix = 'netrsn_turbo.turbo.version_0300.ds_lora'
-            installer = importlib.import_module(prefix + '.installer')
             def package(name):
                 value = types.ModuleType(name)
                 value.__path__ = []
                 sys.modules[name] = value
                 return value
-            package('vllm').__version__ = '0.30.0'
+
             for name in (
-                'vllm.model_executor', 'vllm.model_executor.models',
+                'vllm', 'vllm.model_executor', 'vllm.model_executor.models',
                 'vllm_ascend', 'vllm_ascend.models', 'vllm_ascend.models.deepseek_v4',
             ):
                 package(name)
@@ -128,47 +124,28 @@ class LayoutTests(unittest.TestCase):
             utils.WeightsMapper = WeightsMapper
             sys.modules[utils.__name__] = utils
 
-            manager_module = types.ModuleType('netrsn_turbo.turbo_manager.turbo_utils')
-            class TurboManager:
-                @staticmethod
-                def register_patch(*args):
-                    raise AssertionError('new model attributes must not propagate shared defaults')
-                @staticmethod
-                def apply_patches():
-                    pass
-            manager_module.TurboManager = TurboManager
-            sys.modules[manager_module.__name__] = manager_module
-            target = 'vllm_ascend.models.deepseek_v4.model'
-            class ModelLoader(importlib.abc.Loader):
-                def create_module(self, spec):
-                    return None
-                def exec_module(self, module):
-                    class SupportsLoRA:
-                        lora_skip_prefixes = []
-                        hf_to_vllm_mapper = None
-                    class Model(SupportsLoRA):
-                        pass
-                    module.AscendDeepseekV4ForCausalLM = Model
-                    module.base_class = SupportsLoRA
-            class ModelFinder(importlib.abc.MetaPathFinder):
+            class Model:
+                lora_skip_prefixes = []
+                hf_to_vllm_mapper = None
+            upstream = types.ModuleType('vllm_ascend.models.deepseek_v4.model')
+            upstream.AscendDeepseekV4ForCausalLM = Model
+            sys.modules[upstream.__name__] = upstream
+
+            class BlockNativeDependencies(importlib.abc.MetaPathFinder):
                 def find_spec(self, fullname, *args):
-                    if fullname == target:
-                        return importlib.util.spec_from_loader(fullname, ModelLoader())
                     if fullname.split('.')[0] in ('torch', 'torch_npu', 'ops_repo'):
                         raise AssertionError('unexpected dependency: ' + fullname)
+                    if fullname == 'netrsn_turbo.turbo_ops':
+                        raise AssertionError('unexpected native backend')
                     return None
-            sys.meta_path.insert(0, ModelFinder())
-            finder = installer.apply_lora_patch()
-            payload_name = prefix + '.' + target
-            assert target not in sys.modules and payload_name not in sys.modules
-            upstream = importlib.import_module(target)
-            payload = sys.modules[payload_name]
-            assert upstream.AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper is payload.hf_to_vllm_mapper
-            assert upstream.AscendDeepseekV4ForCausalLM.lora_skip_prefixes == ['mtp.']
-            assert upstream.base_class.lora_skip_prefixes == []
-            assert upstream.base_class.hf_to_vllm_mapper is None
+
+            sys.meta_path.insert(0, BlockNativeDependencies())
+            prefix = 'netrsn_turbo.turbo.version_0300.ds_lora'
+            payload = importlib.import_module(prefix + '.vllm_ascend.models.deepseek_v4.model')
+            assert payload.lora_skip_prefixes == ['mtp.']
             assert payload.hf_to_vllm_mapper.rules['orig_to_new_substr']['.w1.'] == '.gate_proj.'
-            assert finder.applied[target] is upstream
+            assert Model.lora_skip_prefixes == []
+            assert Model.hf_to_vllm_mapper is None
             assert 'netrsn_turbo.turbo_ops' not in sys.modules
         ''')
 

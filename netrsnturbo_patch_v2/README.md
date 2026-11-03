@@ -28,7 +28,7 @@ version_0300 DS LoRA patch
 - `NPUModelRunner._dummy_run` 使用调用方给定的 `num_active_loras`，移除强制替换为
   `max_loras` 的旧逻辑，使 LoRA dummy-run 与图捕获描述使用同一个数量。
 - 量化 MoE 从原 `quant_moe` 模块动态读取 routing、w13、w2 helper，保持 v2 的可替换
-  模块属性语义。这里采用运行时导入，以兼容 TurboManager 的延迟加载与循环依赖。
+  模块属性语义。这里采用运行时导入，避免 helper 依赖形成循环导入。
 - C++ / AscendC 源码与上一版相同，仍为 10 个接口、7 个内核；已重新核对 v2 的来源哈希。
 
 `_lora_linear_kernel`、`_get_shrink_buffer`、`_lora_linear_matmul` 在目标基线已有，
@@ -76,6 +76,13 @@ tests/                        无硬件测试及可选 NPU 回归
 是内部 `turbo_ops` 的连接层。当前补丁目标全部属于 `vllm_ascend`，因此没有空的
 `vllm/` 目录。各级 `__init__.py` 不提前加载算子或模型，原 `apply_lora_patch()`
 导入路径不变。
+
+`apply_lora_patch()` 逐条调用 `TurboManager.register_patch()`，共 **20 个现有函数或
+方法替换**，最后统一调用一次 `TurboManager.apply_patches()`。**13 个新增属性**
+直接赋值；环境变量字典、MoE 缓存字段和 W8A8 冻结注册项分别更新。
+`manifest.py` 仅作补丁范围核对，不再驱动安装循环。入口不安装 import hook，
+也不维护已应用模块或初始化状态；版本分发、导入时序和防重复注册由 Netrsn 负责。
+调用入口时会加载所需的原模块和补丁模块，应接入 Netrsn 已有的 LoRA 初始化阶段。
 
 Worker 补丁在注册时对已加载方法做单点 AST 改写，只替换 `maybe_dummy_run_with_lora`
 调用的 `num_active_loras` 实参；保留原模块 globals、方法签名和 `torch.inference_mode()`。
@@ -189,8 +196,8 @@ TURBO_OPS_RUN_NPU_TESTS=1 TURBO_OPS_TEST_DEVICE=npu:0 \
 局部算子路径；这些测试不能替代真实多卡 vLLM 0.30 模型验证。
 本次开发环境为 Windows，没有 torch / CANN / NPU，因此未执行原生编译或 NPU 测试。
 无硬件测试覆盖 v2 单槽位分派、Worker 活跃 LoRA 数量、量化 helper 动态替换、
-目录映射与延迟导入，以及 setuptools wheel / sdist 内容和 native → pure 重建残留。
-本地完整运行 **94 项测试，全部通过**，包括 Worker 生成方法与真实 v2 方法的执行码比对。
+目录映射、显式注册、包入口懒加载，以及 setuptools wheel / sdist 内容和 native → pure 重建残留。
+本地完整运行 **91 项测试，全部通过**，包括 Worker 生成方法与真实 v2 方法的执行码比对。
 打包测试中的原生文件为合成样本，仅验证分发机制。
 
 源码固定于 DS v2 `v30_lora_v2` 提交 `5dd159d7d2acf70c0bfcec1a2055ac52c60a13bf`，
