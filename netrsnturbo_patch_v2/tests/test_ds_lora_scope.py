@@ -129,6 +129,7 @@ class CommunicationTests(unittest.TestCase):
             "get_ep_group": lambda: types.SimpleNamespace(world_size=2),
             "_MOE_COMM_SELECTORS": {"mc2": lambda *args: Comm.MC2},
             "logger": types.SimpleNamespace(debug=lambda *args: None),
+            "log_once": lambda *args: None,
         }
         source = PAYLOAD / "vllm_ascend/ascend_forward_context.py"
         node = definitions(ast.parse(source.read_text(encoding="utf-8")))["select_moe_comm_method"]

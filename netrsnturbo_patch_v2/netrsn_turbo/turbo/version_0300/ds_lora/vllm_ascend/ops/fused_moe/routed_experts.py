@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from netrsn_turbo.turbo_ops._logging import log_once
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 
 
@@ -50,6 +51,7 @@ def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
     self._lora_routing = None
     lora_context = mlp_compute_input.lora_context
     if lora_context is not None:  # LoRA applied
+        log_once("unquant_moe.w13", "[DS LoRA] enter rewritten path: unquant_moe.w13")
         from vllm_ascend.lora.fused_moe import (
             _build_combined_lora_idx_allgather,
             _recover_moe_lora_routing_all2all,
@@ -115,6 +117,7 @@ def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_o
     # gating on _lora_routing here silently skipped the w2 (down_proj)
     # delta for every unquantized TP/AllGather deployment.
     if self.lora_context is not None:
+        log_once("unquant_moe.w2", "[DS LoRA] enter rewritten path: unquant_moe.w2")
         from vllm_ascend.lora.fused_moe import moe_lora_apply_w2
 
         moe_lora_apply_w2(

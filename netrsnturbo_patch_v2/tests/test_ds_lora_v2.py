@@ -29,7 +29,7 @@ def load_function(source, name, **dependencies):
         body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
         type_ignores=[],
     )
-    namespace = dict(dependencies)
+    namespace = {"log_once": lambda *args: None, **dependencies}
     exec(compile(ast.fix_missing_locations(module), str(source), "exec"), namespace)
     return namespace[name]
 
@@ -37,8 +37,10 @@ def load_function(source, name, **dependencies):
 class SingleSlotDispatchTests(unittest.TestCase):
     def setUp(self):
         self.registry_op = mock.Mock(name="upstream_lora_linear")
+        self.path_log = mock.Mock()
         self.add_linear = load_function(
-            PUNICA, "add_lora_linear", lora_linear=self.registry_op, ENABLE_ADD_LORA_KERNEL=True
+            PUNICA, "add_lora_linear", lora_linear=self.registry_op, ENABLE_ADD_LORA_KERNEL=True,
+            log_once=self.path_log,
         )
         self.wrapper = types.SimpleNamespace(
             _single_lora_slot=True,
@@ -64,6 +66,7 @@ class SingleSlotDispatchTests(unittest.TestCase):
         self.wrapper.add_lora.assert_not_called()
         self.wrapper.add_shrink.assert_not_called()
         self.wrapper.add_expand.assert_not_called()
+        self.assertEqual(self.path_log.call_args.args[0], "linear.single_slot_registry")
 
     def test_single_slot_preserves_packed_weights_and_add_inputs(self):
         packed_a, packed_b = object(), object()
@@ -88,6 +91,7 @@ class SingleSlotDispatchTests(unittest.TestCase):
                 self.registry_op.assert_not_called()
                 self.wrapper.add_shrink.assert_not_called()
                 self.wrapper.add_expand.assert_not_called()
+                self.assertEqual(self.path_log.call_args.args[0], "linear.turbo_ops_add_lora")
 
     def test_explicit_buffer_bypasses_both_fused_dispatches(self):
         buffer, marker = (object(), object()), object()
@@ -99,6 +103,7 @@ class SingleSlotDispatchTests(unittest.TestCase):
         self.wrapper.add_expand.assert_called_once_with(
             self.y, buffer, self.b, self.slices, add_inputs=True, marker=marker
         )
+        self.assertEqual(self.path_log.call_args.args[0], "linear.shrink_expand")
 
     def test_single_slot_fastpath_does_not_depend_on_generic_kernel_flag(self):
         self.add_linear.__globals__["ENABLE_ADD_LORA_KERNEL"] = False

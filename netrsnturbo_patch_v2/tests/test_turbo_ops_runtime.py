@@ -9,7 +9,7 @@ import platform
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -19,9 +19,14 @@ PACKAGE = ROOT / "netrsn_turbo" / "turbo_ops"
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
-        spec = importlib.util.spec_from_file_location("turbo_runtime_test", PACKAGE / "_runtime.py")
-        self.runtime = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.runtime)
+        modules = patch.dict(sys.modules)
+        modules.start()
+        self.addCleanup(modules.stop)
+        package_name = "_turbo_runtime_under_test"
+        package = ModuleType(package_name)
+        package.__path__ = [str(PACKAGE)]
+        sys.modules[package_name] = package
+        self.runtime = importlib.import_module(package_name + "._runtime")
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -35,11 +40,17 @@ class RuntimeTests(unittest.TestCase):
         (self.directory / "_C.so").touch()
         (self.directory / "libturbo_ops_lora_kernels.so").touch()
         self.namespace = SimpleNamespace(**{name: Mock(name=name) for name in self.runtime.OP_NAMES})
-        self.torch = SimpleNamespace(__version__="2.9.0", ops=SimpleNamespace(
-            turbo_ops=self.namespace, load_library=Mock()))
+        self.torch = SimpleNamespace(
+            __version__="2.9.0",
+            compiler=SimpleNamespace(is_compiling=Mock(return_value=False)),
+            npu=SimpleNamespace(is_initialized=Mock(return_value=True),
+                                is_current_stream_capturing=Mock(return_value=False)),
+            ops=SimpleNamespace(turbo_ops=self.namespace, load_library=Mock()),
+        )
         self.torch_npu = SimpleNamespace(__version__="2.9.0.post1",
                                          npu=SimpleNamespace(get_soc_version=Mock(return_value=250)))
         self.modules = {"torch": self.torch, "torch_npu": self.torch_npu}
+        sys.modules.update(self.modules)
         patches = (
             patch.object(self.runtime, "_package_dir", return_value=self.directory),
             patch.object(self.runtime.importlib, "import_module", side_effect=self.modules.__getitem__),
@@ -69,6 +80,42 @@ class RuntimeTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=8) as executor:
             list(executor.map(lambda _: self.runtime.initialize(), range(32)))
         self.torch.ops.load_library.assert_called_once()
+
+    def test_load_and_dispatch_have_separate_first_use_messages(self):
+        x, y = object(), object()
+        with self.assertLogs("vllm.netrsn_turbo", level="INFO") as captured:
+            first = self.runtime.call("bgmv_shrink", x, y, scale=0.5)
+            second = self.runtime.call("bgmv_shrink", x, y, scale=0.75)
+            self.runtime.call("add_lora", x)
+        messages = [record.getMessage() for record in captured.records]
+        loaded = [message for message in messages if "native library loaded" in message]
+        shrink = [message for message in messages if "torch.ops.turbo_ops.bgmv_shrink" in message]
+        add_lora = [message for message in messages if "torch.ops.turbo_ops.add_lora" in message]
+        self.assertEqual(len(loaded), 1)
+        self.assertIn(str(self.directory), loaded[0])
+        self.assertIn(self.info["soc_version"], loaded[0])
+        self.assertEqual(len(shrink), 1)
+        self.assertEqual(len(add_lora), 1)
+        self.assertIn("dispatch custom op", shrink[0])
+        self.assertIn("C++ selects the kernel or skip path", shrink[0])
+        self.assertIs(first, self.namespace.bgmv_shrink.return_value)
+        self.assertIs(second, self.namespace.bgmv_shrink.return_value)
+        self.assertEqual(self.namespace.bgmv_shrink.call_count, 2)
+        self.namespace.bgmv_shrink.assert_called_with(x, y, scale=0.75)
+
+    def test_compiled_dispatch_skips_logging_without_skipping_operation(self):
+        self.runtime.initialize()
+        self.torch.compiler.is_compiling.return_value = True
+        marker = object()
+        with self.assertNoLogs("vllm.netrsn_turbo", level="INFO"):
+            result = self.runtime.call("bgmv_shrink", marker)
+        self.assertIs(result, self.namespace.bgmv_shrink.return_value)
+        self.namespace.bgmv_shrink.assert_called_once_with(marker)
+        self.torch.compiler.is_compiling.return_value = False
+        with self.assertLogs("vllm.netrsn_turbo", level="INFO") as captured:
+            self.runtime.call("bgmv_shrink", marker)
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("torch.ops.turbo_ops.bgmv_shrink", captured.output[0])
 
     def test_incomplete_or_ambiguous_artifacts_fail_before_torch_import(self):
         for filename in ("_build_info.json", "_C.so", "libturbo_ops_lora_kernels.so"):

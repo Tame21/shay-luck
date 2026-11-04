@@ -29,7 +29,7 @@ def load_functions(filename, names, **dependencies):
         body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *functions],
         type_ignores=[],
     )
-    namespace = dict(dependencies)
+    namespace = {"log_once": lambda *args: None, **dependencies}
     exec(compile(ast.fix_missing_locations(module), str(PAYLOAD / filename), "exec"), namespace)
     return namespace
 

@@ -7,6 +7,8 @@ import platform
 import sys
 import threading
 
+from ._logging import log_once
+
 OP_NAMES = (
     "bgmv_shrink", "bgmv_expand", "sgmv_shrink", "sgmv_expand",
     "build_combined_lora_idx", "add_lora", "add_lora_shrink", "add_lora_expand",
@@ -86,8 +88,20 @@ def initialize():
                 "for this environment and restart the worker." % exc
             ) from exc
         _ops = namespace
+        log_once(
+            "turbo_ops.loaded",
+            "[turbo_ops] native library loaded and APIs registered: path=%s soc=%s",
+            package,
+            info["soc_version"],
+        )
 
 
 def call(name, *args, **kwargs):
     initialize()
+    log_once(
+        "turbo_ops.call." + name,
+        "[turbo_ops] dispatch custom op: torch.ops.turbo_ops.%s "
+        "(C++ selects the kernel or skip path)",
+        name,
+    )
     return getattr(_ops, name)(*args, **kwargs)

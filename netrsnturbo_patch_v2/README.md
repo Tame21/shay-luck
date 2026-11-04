@@ -43,6 +43,7 @@ netrsn_turbo/
   turbo_ops/
     __init__.py / lora.py        十个公开接口
     _runtime.py                 延迟加载与 ABI 检查
+    _logging.py                 每进程首次调用与路径日志
     csrc/CMakeLists.txt         原生构建入口
     csrc/kernels/lora/          七个 AscendC 内核
     csrc/lora/                  Host、Meta、ACLNN adapter
@@ -93,6 +94,35 @@ Worker 补丁在注册时对已加载方法做单点 AST 改写，只替换 `may
 `add_lora_expand_delta`、`add_lora_swiglu_quant`。
 后六个对应 DS 新增接口，前四个是其所需的 BG/SG 基础算子。
 参数顺序、返回值及原地写入行为与已迁入 `ops-repo` 的 DS 接口保持一致。
+
+## 运行日志
+
+Python 侧通过 `vllm.netrsn_turbo` 的 INFO 日志记录首次命中，复用 vLLM 的日志配置。
+默认 INFO 级别即可看到；若部署提高了日志级别，启动进程前设 `VLLM_LOGGING_LEVEL=INFO`。
+使用自定义日志配置时，需允许该 logger 的 INFO 输出。每条日志带 `[NetrsnTurbo]`
+和 PID，每个 Worker 对每种事件只打印一次：
+
+```text
+[NetrsnTurbo][pid=123] [turbo_ops] native library loaded and APIs registered: path=... soc=...
+[NetrsnTurbo][pid=123] [turbo_ops] dispatch custom op: torch.ops.turbo_ops.add_lora (C++ selects the kernel or skip path)
+[NetrsnTurbo][pid=123] [DS LoRA] enter rewritten path: linear.single_slot_registry -> vllm_ascend.lora.lora_ops.lora_linear
+[NetrsnTurbo][pid=123] [DS LoRA] enter rewritten path: quant_moe.overlap_delta
+```
+
+`loaded` 表示动态库及十个接口已就绪；`dispatch custom op` 表示 Python 正在调用
+对应自定义算子接口，不代表 C++ 最终选择了融合内核，也不代表异步 NPU 计算已经完成。
+`enter rewritten path` 表示进入改写后的 Python 分支，覆盖 Linear 的单槽位 registry、
+自定义 add_lora、shrink/expand 路径，MoE 的 add_lora、分阶段 shrink/expand、BGMV 路径，
+量化 MoE 的 sequential / overlap_delta / overlap_phase，以及非量化 MoE 的 w13 / w2。
+通信选择另有 `rewritten select_moe_comm_method selected=...` 日志。
+
+日志可能在预热时首次出现；torch.compile 跟踪与 ACL 图捕获期间跳过打印，且不消耗
+首次记录标记。图回放不会再次执行这些 Python 日志，因此日志缺失不等于算子没有执行。
+日志不读取张量内容，也不增加设备同步。独立使用算子验证包时，先配置 Python INFO
+日志（例如 `logging.basicConfig(level=logging.INFO)`），即可看到同样的信息。
+
+这次日志更新只涉及 Python，无须重新编译 `.so`。部署时同步 `_runtime.py`、新增的
+`_logging.py` 及改动的 `ds_lora` Python 文件，并重启 Worker。
 
 ## 合入真实 NetrsnTurbo
 
@@ -197,7 +227,8 @@ TURBO_OPS_RUN_NPU_TESTS=1 TURBO_OPS_TEST_DEVICE=npu:0 \
 本次开发环境为 Windows，没有 torch / CANN / NPU，因此未执行原生编译或 NPU 测试。
 无硬件测试覆盖 v2 单槽位分派、Worker 活跃 LoRA 数量、量化 helper 动态替换、
 目录映射、显式注册、包入口懒加载，以及 setuptools wheel / sdist 内容和 native → pure 重建残留。
-本地完整运行 **91 项测试，全部通过**，包括 Worker 生成方法与真实 v2 方法的执行码比对。
+本地完整运行 **99 项测试，全部通过**，包括日志去重、编译/捕获时跳过日志、
+算子调用转发，以及 Worker 生成方法与真实 v2 方法的执行码比对。
 打包测试中的原生文件为合成样本，仅验证分发机制。
 
 源码固定于 DS v2 `v30_lora_v2` 提交 `5dd159d7d2acf70c0bfcec1a2055ac52c60a13bf`，

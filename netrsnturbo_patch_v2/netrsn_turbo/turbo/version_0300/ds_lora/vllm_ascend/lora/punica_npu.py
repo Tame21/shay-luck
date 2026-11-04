@@ -13,6 +13,7 @@ from .ops_backend import get_lora_ops
 import os
 
 import torch
+from netrsn_turbo.turbo_ops._logging import log_once
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -376,6 +377,11 @@ def add_lora_linear(
             # Single active adapter: the registry dispatch routes to a
             # plain matmul with the adapter mask (or the triton packed
             # path on A3), which beats the generic punica/fused dispatch.
+            log_once(
+                "linear.single_slot_registry",
+                "[DS LoRA] enter rewritten path: linear.single_slot_registry "
+                "-> vllm_ascend.lora.lora_ops.lora_linear",
+            )
             lora_linear(
                 self._wrapper_id,
                 y,
@@ -394,6 +400,10 @@ def add_lora_linear(
             # Fused single-op path: in-tree fused kernel / gmm / bgmv
             # branch inside the opaque op (the C++ side falls back to
             # gmm/bgmv internally for ineligible shapes).
+            log_once(
+                "linear.turbo_ops_add_lora",
+                "[DS LoRA] enter rewritten path: linear.turbo_ops_add_lora",
+            )
             self.add_lora(
                 y, x, lora_a_stacked, lora_b_stacked, scale, output_slices, add_inputs=add_inputs, **kwargs
             )
@@ -406,6 +416,7 @@ def add_lora_linear(
         buffer = tuple(
             torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices))
         )
+    log_once("linear.shrink_expand", "[DS LoRA] enter rewritten path: linear.shrink_expand")
     self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
     self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
 
@@ -521,6 +532,7 @@ def add_lora_fused_moe(
         # keeps the grouped path below. fully_sharded is checked first: the
         # fused kernel cannot host the cross-rank collective that fully
         # sharded LoRA needs between shrink and expand.
+        log_once("moe.turbo_ops_add_lora", "[DS LoRA] enter rewritten path: moe.turbo_ops_add_lora")
         a_views = [a.view(-1, 1, a.shape[-2], a.shape[-1]) for a in lora_a_stacked]
         b_views = [b.view(-1, 1, b.shape[-2], b.shape[-1]) for b in lora_b_stacked]
         output_slices_fused = [b.shape[-2] for b in lora_b_stacked]
@@ -550,6 +562,12 @@ def add_lora_fused_moe(
         )
 
     if group_list is not None and not mul_routed_weight:
+        log_once(
+            "moe.grouped_shrink_expand." + phase,
+            "[DS LoRA] enter rewritten path: moe.grouped_shrink_expand phase=%s fully_sharded=%s",
+            phase,
+            fully_sharded,
+        )
         n_slices = len(lora_a_stacked)
         max_loras = lora_a_stacked[0].shape[0]
         local_rank = lora_a_stacked[0].shape[-2]
@@ -659,6 +677,7 @@ def add_lora_fused_moe(
 
     if phase != "full":
         raise ValueError('phase="shrink"/"expand" is only supported on the two-op (group_list) branch')
+    log_once("moe.bgmv_shrink_expand", "[DS LoRA] enter rewritten path: moe.bgmv_shrink_expand")
     cur_offset = offset
     for slice_idx in range(len(lora_a_stacked)):
         # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].

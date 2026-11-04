@@ -302,6 +302,7 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn("netrsn_turbo/turbo_ops/" + build.KERNEL_LIBRARY, names)
             self.assertIn("netrsn_turbo/turbo_ops/LICENSE", names)
             self.assertIn("netrsn_turbo/turbo_ops/provenance.json", names)
+            self.assertIn("netrsn_turbo/turbo_ops/_logging.py", names)
             self.assertNotIn("netrsn_turbo/__init__.py", names)
             self.assertFalse(any(name.startswith(("build_support/", "netrsn_turbo/turbo/", "netrsn_turbo/turbo_ops/csrc/")) for name in names))
             info = json.loads(archive.read("netrsn_turbo/turbo_ops/" + build.BUILD_INFO))

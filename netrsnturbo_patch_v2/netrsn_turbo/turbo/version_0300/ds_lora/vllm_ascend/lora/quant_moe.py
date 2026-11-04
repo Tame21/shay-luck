@@ -24,6 +24,7 @@ from .ops_backend import get_lora_ops
 
 import torch
 import torch_npu
+from netrsn_turbo.turbo_ops._logging import log_once
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -147,6 +148,11 @@ def _apply_dynamic_int8_moe_lora(
 
     overlap_variant = _lora_overlap_eligible(lora_context, comm_type)
     if overlap_variant is not None:
+        log_once(
+            "quant_moe.overlap_" + overlap_variant,
+            "[DS LoRA] enter rewritten path: quant_moe.overlap_%s",
+            overlap_variant,
+        )
         apply_overlap = (
             _apply_dynamic_int8_moe_lora_overlap_phase
             if overlap_variant == "phase"
@@ -161,6 +167,7 @@ def _apply_dynamic_int8_moe_lora(
             w2_scale=w2_scale[0],
         )
 
+    log_once("quant_moe.sequential", "[DS LoRA] enter rewritten path: quant_moe.sequential")
     quantized_input, input_scale = DeviceOperator.npu_dynamic_quant(
         hidden_states=hidden_states,
         dynamic_scale=None,

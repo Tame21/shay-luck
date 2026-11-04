@@ -8,6 +8,7 @@ replace upstream symbols or execute registration decorators.
 
 from __future__ import annotations
 
+from netrsn_turbo.turbo_ops._logging import log_once
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
@@ -73,6 +74,12 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
+        )
+    if lora_config is not None:
+        log_once(
+            "moe_comm." + moe_comm_type.name,
+            "[DS LoRA] rewritten select_moe_comm_method selected=%s",
+            moe_comm_type.name,
         )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
