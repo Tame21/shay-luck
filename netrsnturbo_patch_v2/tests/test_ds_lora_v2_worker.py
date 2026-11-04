@@ -10,6 +10,7 @@ import itertools
 import linecache
 from pathlib import Path
 import runpy
+import sys
 import types
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,7 @@ FACTORY = runpy.run_path(str(PAYLOAD))
 rewrite = FACTORY["_dummy_run"]
 SOURCE = '''\
 from __future__ import annotations
+import torch
 
 class Runner:
     @torch.inference_mode()
@@ -65,12 +67,16 @@ class WorkerRewriteTests(unittest.TestCase):
         filename = f"<ds-lora-worker-fixture-{next(FILENAMES)}>"
         linecache.cache[filename] = (len(source), None, source.splitlines(keepends=True), filename)
         self.addCleanup(linecache.cache.pop, filename, None)
+        torch = types.ModuleType("torch")
+        torch.inference_mode = inference_mode
+        torch.tensor = lambda value: ("tensor", value)
         namespace = {
-            "__name__": "worker_fixture", "torch": types.SimpleNamespace(inference_mode=inference_mode),
+            "__name__": "worker_fixture", "torch": torch,
             "default_token": default_token, "DEFAULT": object(), "LIVE_VALUE": 10,
             "_dummy_run": object(),
         }
-        exec(compile(source, filename, "exec", dont_inherit=True), namespace)
+        with patch.dict(sys.modules, {"torch": torch}):
+            exec(compile(source, filename, "exec", dont_inherit=True), namespace)
         runner = namespace["Runner"]
         runner.maybe_dummy_run_with_lora = context
         runner.lora_config = types.SimpleNamespace(max_loras=64)
@@ -188,17 +194,25 @@ class WorkerRewriteTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly one inference-mode wrapper"):
             rewrite(raw)
 
-    def test_active_method_changed_by_other_loader_is_not_overwritten(self):
-        runner, _, _, _ = self.fixture()
+    def test_imported_module_calls_survive_full_module_compilation(self):
+        # Python 3.12+ compiles imported-module calls differently from the same
+        # method compiled alone. Both forms are valid; byte equality is not a
+        # reliable check that the original source matches the active method.
+        source = SOURCE.replace(
+            'return observed, LIVE_VALUE, num_tokens, payload, "kept-body"',
+            'return observed, LIVE_VALUE, torch.tensor(num_tokens), payload, "kept-body"',
+        )
+        runner, namespace, events, _ = self.fixture(source)
         original = runner._dummy_run
-        raw = inspect.unwrap(original)
-        constants = tuple("other-loader" if value == "kept-body" else value for value in raw.__code__.co_consts)
-        raw.__code__ = raw.__code__.replace(co_consts=constants)
-        before = raw.__code__
-        with self.assertRaisesRegex(RuntimeError, "source does not match the active method"):
-            rewrite(original)
-        self.assertIs(raw.__code__, before)
+        replacement = rewrite(original)
+        for count in (0, 1, 4):
+            with self.subTest(count=count):
+                events.clear()
+                result = replacement(runner(), num_active_loras=count)
+                self.assertEqual(result, (count, 10, ("tensor", 7), namespace["DEFAULT"], "kept-body"))
+                self.assertEqual(events, ["inference-enter", ("lora", count), "inference-exit"])
         self.assertIs(runner._dummy_run, original)
+        self.assertEqual(original(runner(), num_active_loras=1)[0], 64)
 
     @unittest.skipUnless(
         (WORKSPACE / "vllm-ascend/vllm_ascend/worker/model_runner_v1.py").is_file()
@@ -222,24 +236,26 @@ class WorkerRewriteTests(unittest.TestCase):
         keyword.value = ast.Name(id="num_active_loras", ctx=ast.Load())
         self.assertEqual(ast.dump(baseline), ast.dump(updated))
 
-        # Compile the complete real bodies with only annotation/decorator stubs.
-        # No worker body or upstream module is executed. This also proves the
-        # source fingerprint accepts the actual baseline, not just our fixture.
+        # Compile each complete module to preserve the real import context,
+        # then extract the method's code without executing any upstream import
+        # or worker body. Only the inference decorator uses a local stub.
         _, namespace, _, _ = self.fixture()
-        namespace["CUDAGraphMode"] = type("CUDAGraphMode", (), {})
-        namespace["torch"].Tensor = type("Tensor", (), {})
         functions = []
         for checkout in ("vllm-ascend", "vllm-ascend-ds-v2"):
             path = WORKSPACE / checkout / "vllm_ascend/worker/model_runner_v1.py"
-            runner = ast.ClassDef(name="NPUModelRunner", bases=[], keywords=[],
-                                  body=[method(checkout)], decorator_list=[])
-            tree = ast.fix_missing_locations(ast.Module(body=[runner], type_ignores=[]))
-            exec(compile(tree, str(path), "exec", dont_inherit=True), namespace)
-            functions.append(namespace["NPUModelRunner"]._dummy_run)
+            module_code = compile(path.read_text(encoding="utf-8"), str(path), "exec", dont_inherit=True)
+            class_code = next(value for value in module_code.co_consts
+                              if isinstance(value, types.CodeType) and value.co_name == "NPUModelRunner")
+            method_code = next(value for value in class_code.co_consts
+                               if isinstance(value, types.CodeType) and value.co_name == "_dummy_run")
+            raw = types.FunctionType(method_code, namespace)
+            functions.append(namespace["torch"].inference_mode()(raw))
+        original_code = inspect.unwrap(functions[0]).__code__
         replacement = rewrite(functions[0])
-        signature = FACTORY["_code_signature"]
-        self.assertEqual(signature(inspect.unwrap(replacement).__code__),
-                         signature(inspect.unwrap(functions[1]).__code__))
+        self.assertIsNot(replacement, functions[0])
+        self.assertIs(inspect.unwrap(replacement).__globals__, namespace)
+        self.assertIs(inspect.unwrap(functions[0]).__code__, original_code)
+        self.assertIs(rewrite(functions[1]), functions[1])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,6 @@ import ast
 from functools import WRAPPER_ASSIGNMENTS
 import inspect
 import textwrap
-from types import CodeType
 
 
 _MARKER = "_netrsn_ds_lora_v2_dummy_run"
@@ -21,21 +20,12 @@ def _unsupported(reason):
     return RuntimeError("DS LoRA worker _dummy_run patch: " + reason)
 
 
-def _code_signature(code):
-    """Compare executable code, ignoring source positions and class qualnames."""
-    constants = tuple(_code_signature(value) if isinstance(value, CodeType) else value
-                      for value in code.co_consts)
-    return (code.co_code, constants, code.co_names, code.co_varnames,
-            code.co_freevars, code.co_cellvars, code.co_argcount,
-            code.co_posonlyargcount, code.co_kwonlyargcount, code.co_flags,
-            getattr(code, "co_exceptiontable", b""))
-
-
 def _dummy_run(original):
     """Return a decorated replacement, or the original if already corrected.
 
-    Fail closed on source drift instead of replacing a whole upstream method
-    or altering the shared context manager used by other worker paths.
+    Rewrite only the known call in the installed source. Bytecode equality
+    cannot validate source here: module-level imports affect the compiler's
+    call instructions even when the method body is unchanged.
     """
     if getattr(original, _MARKER, False) is True:
         return original
@@ -97,14 +87,6 @@ def _dummy_run(original):
     if "__builtins__" not in raw.__globals__:
         raise _unsupported("original globals have no builtins binding")
     namespace = {}
-    try:
-        source_code = compile(tree, raw.__code__.co_filename, "exec", flags=flags, dont_inherit=True)
-        method_code = next(value for value in source_code.co_consts
-                           if isinstance(value, CodeType) and value.co_name == method.name)
-    except (SyntaxError, ValueError, StopIteration) as exc:
-        raise _unsupported("cannot compile the original method source") from exc
-    if _code_signature(method_code) != _code_signature(raw.__code__):
-        raise _unsupported("source does not match the active method; another patch or AST loader changed it")
     keywords[0].value = ast.copy_location(fixed, argument)
     try:
         code = compile(tree, raw.__code__.co_filename, "exec", flags=flags, dont_inherit=True)

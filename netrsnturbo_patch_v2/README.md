@@ -84,10 +84,17 @@ tests/                        无硬件测试及可选 NPU 回归
 `manifest.py` 仅作补丁范围核对，不再驱动安装循环。入口不安装 import hook，
 也不维护已应用模块或初始化状态；版本分发、导入时序和防重复注册由 Netrsn 负责。
 调用入口时会加载所需的原模块和补丁模块，应接入 Netrsn 已有的 LoRA 初始化阶段。
+入口先加载 `vllm_ascend.ops`，再导入 `vllm_ascend.lora` 模块。若先导入
+`lora.fused_moe`，它加载 `ops` 时会经 `prepare_finalize` 回读尚未定义的
+`prepare_lora_indices`，产生 `partially initialized module` 循环导入错误。
+这一顺序只调整 Python 模块加载，无须重新编译算子。
 
 Worker 补丁在注册时对已加载方法做单点 AST 改写，只替换 `maybe_dummy_run_with_lora`
 调用的 `num_active_loras` 实参；保留原模块 globals、方法签名和 `torch.inference_mode()`。
-目标环境需保留 vLLM Ascend 的 Python 源文件；遇到不匹配的方法布局或包装层会明确报错。
+目标环境需保留 vLLM Ascend 的 Python 源文件；遇到不匹配的目标调用或包装层会明确报错。
+方法片段与完整模块的编译上下文不同，即使源码相同，Python 3.12 也可能生成不同的
+调用指令，因此不使用字节码全等校验。此补丁以已安装源码为准；若其他 AST loader
+改写了运行中方法的函数体，这些源码之外的改动不会被保留。
 
 公开接口：`bgmv_shrink`、`bgmv_expand`、`sgmv_shrink`、`sgmv_expand`、
 `build_combined_lora_idx`、`add_lora`、`add_lora_shrink`、`add_lora_expand`、
@@ -227,8 +234,10 @@ TURBO_OPS_RUN_NPU_TESTS=1 TURBO_OPS_TEST_DEVICE=npu:0 \
 本次开发环境为 Windows，没有 torch / CANN / NPU，因此未执行原生编译或 NPU 测试。
 无硬件测试覆盖 v2 单槽位分派、Worker 活跃 LoRA 数量、量化 helper 动态替换、
 目录映射、显式注册、包入口懒加载，以及 setuptools wheel / sdist 内容和 native → pure 重建残留。
-本地完整运行 **99 项测试，全部通过**，包括日志去重、编译/捕获时跳过日志、
-算子调用转发，以及 Worker 生成方法与真实 v2 方法的执行码比对。
+本地完整运行 **101 项测试，全部通过**，包括日志去重、编译/捕获时跳过日志、
+算子调用转发，以及完整上游模块编译后的 Worker 方法改写回归。
+导入顺序回归在隔离子进程中使用简化依赖包，复现旧顺序的循环导入并验证入口新顺序；
+该测试不替代真实 torch / CANN 环境的完整启动验证。
 打包测试中的原生文件为合成样本，仅验证分发机制。
 
 源码固定于 DS v2 `v30_lora_v2` 提交 `5dd159d7d2acf70c0bfcec1a2055ac52c60a13bf`，

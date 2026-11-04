@@ -31,6 +31,11 @@ def apply_lora_patch():
     Its spawn-worker entry must call this in each worker process as usual.
     """
     from netrsn_turbo.turbo_manager.turbo_utils import TurboManager
+
+    # ops initializes the MoE pipeline, which imports LoRA helpers itself.
+    # Loading lora.fused_moe first re-enters it before prepare_lora_indices exists.
+    import vllm_ascend.ops  # noqa: F401
+
     from vllm_ascend import envs
     from vllm_ascend.lora import fused_moe, punica_npu, quant_moe
     from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
