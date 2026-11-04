@@ -18,7 +18,7 @@ INSTALLER = ROOT / "netrsn_turbo/turbo/version_0300/ds_lora/installer.py"
 # are reduced to inert definitions so Python's real package loader can expose
 # the cycle without framework or hardware dependencies.
 MODULES = {
-    "vllm_ascend/__init__.py": "",
+    "vllm_ascend/__init__.py": "def _ensure_global_patch():\n    pass\n",
     "vllm_ascend/envs.py": "",
     "vllm_ascend/lora/__init__.py": "",
     "vllm_ascend/lora/punica_npu.py": "",

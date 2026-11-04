@@ -84,10 +84,17 @@ tests/                        无硬件测试及可选 NPU 回归
 `manifest.py` 仅作补丁范围核对，不再驱动安装循环。入口不安装 import hook，
 也不维护已应用模块或初始化状态；版本分发、导入时序和防重复注册由 Netrsn 负责。
 调用入口时会加载所需的原模块和补丁模块，应接入 Netrsn 已有的 LoRA 初始化阶段。
-入口先加载 `vllm_ascend.ops`，再导入 `vllm_ascend.lora` 模块。若先导入
+入口先调用框架自带的 `vllm_ascend._ensure_global_patch()`，完成 Ascend 平台补丁，
+再加载 `vllm_ascend.ops` 和 `vllm_ascend.lora` 模块。若先导入
 `lora.fused_moe`，它加载 `ops` 时会经 `prepare_finalize` 回读尚未定义的
 `prepare_lora_indices`，产生 `partially initialized module` 循环导入错误。
 这一顺序只调整 Python 模块加载，无须重新编译算子。
+
+DeepSeek V4 模型还会保存导入时的 `FusedMoEFactory` 引用。入口将该模型模块的引用
+直接更新为现有 Ascend 工厂，兼容模型提前加载的情况，避免进入上游
+`FusedTopKBiasRouter → _moe_C.topk_softplus_sqrt` 路径。该绑定不通过
+`TurboManager` 传播，以免同时替换 Ascend 工厂内部保存的原始委托并造成递归。
+这里复用 vLLM Ascend 的路由实现，不增加 `turbo_ops` 接口，也不修改路由计算公式。
 
 Worker 补丁在注册时对已加载方法做单点 AST 改写，只替换 `maybe_dummy_run_with_lora`
 调用的 `num_active_loras` 实参；保留原模块 globals、方法签名和 `torch.inference_mode()`。
@@ -234,9 +241,10 @@ TURBO_OPS_RUN_NPU_TESTS=1 TURBO_OPS_TEST_DEVICE=npu:0 \
 本次开发环境为 Windows，没有 torch / CANN / NPU，因此未执行原生编译或 NPU 测试。
 无硬件测试覆盖 v2 单槽位分派、Worker 活跃 LoRA 数量、量化 helper 动态替换、
 目录映射、显式注册、包入口懒加载，以及 setuptools wheel / sdist 内容和 native → pure 重建残留。
-本地完整运行 **101 项测试，全部通过**，包括日志去重、编译/捕获时跳过日志、
+本地完整运行 **105 项测试，全部通过**，包括日志去重、编译/捕获时跳过日志、
 算子调用转发，以及完整上游模块编译后的 Worker 方法改写回归。
 导入顺序回归在隔离子进程中使用简化依赖包，复现旧顺序的循环导入并验证入口新顺序；
+MoE 工厂回归覆盖冷启动、提前导入模型后的引用刷新，以及原始工厂委托不被替换。
 该测试不替代真实 torch / CANN 环境的完整启动验证。
 打包测试中的原生文件为合成样本，仅验证分发机制。
 

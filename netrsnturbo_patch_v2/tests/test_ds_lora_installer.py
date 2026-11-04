@@ -142,8 +142,19 @@ class InstallerTests(unittest.TestCase):
 
         self.base_model, self.model, self.other_model = SupportsLoRA, DeepSeek, OtherModel
         self.sources["vllm_ascend.models.deepseek_v4.model"].AscendDeepseekV4ForCausalLM = DeepSeek
+        self.generic_factory = function("generic router")
+        self.ascend_factory = function("ascend router")
+        self.sources["vllm_ascend.models.deepseek_v4.model"].FusedMoEFactory = self.generic_factory
+        self.factory_patch = self.add_module(
+            "vllm_ascend.patch.platform.patch_fused_moe",
+            _original_FusedMoE=self.generic_factory,
+            _ascend_FusedMoE=self.ascend_factory,
+        )
+        self.platform_init_calls = []
+        sys.modules["vllm_ascend"]._ensure_global_patch = lambda: self.platform_init_calls.append("platform")
         self.witness = self.add_module(
             "_ds_lora_reference_witness", shared=SupportsLoRA.lora_skip_prefixes, unset=None,
+            factory=self.generic_factory,
         )
         for index, original in enumerate(self.originals.values()):
             setattr(self.witness, f"reference_{index}", original)
@@ -206,6 +217,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(len(expected), 20)
         self.assertCountEqual(self.manager.registrations, expected)
         self.assertEqual(self.manager.apply_count, 1)
+        self.assertEqual(self.platform_init_calls, ["platform"])
         self.assertEqual(sys.meta_path, before)
         initialize.assert_not_called()
         for path in expected:
@@ -215,6 +227,14 @@ class InstallerTests(unittest.TestCase):
                 self.assertIs(actual.__wrapped__, self.replacements[path])
             else:
                 self.assertIs(actual, self.replacements[path])
+
+    def test_deepseek_factory_binding_uses_ascend_without_replacing_its_delegate(self):
+        installer.apply_lora_patch()
+        model_module = self.sources["vllm_ascend.models.deepseek_v4.model"]
+        self.assertIs(model_module.FusedMoEFactory, self.ascend_factory)
+        self.assertIs(self.factory_patch._original_FusedMoE, self.generic_factory)
+        self.assertIs(self.witness.factory, self.generic_factory)
+        self.assertFalse(any(path.endswith("FusedMoEFactory") for path in self.manager.registrations))
 
     def test_preimported_references_and_quant_helper_globals_follow_manager(self):
         installer.apply_lora_patch()

@@ -31,6 +31,10 @@ def apply_lora_patch():
     Its spawn-worker entry must call this in each worker process as usual.
     """
     from netrsn_turbo.turbo_manager.turbo_utils import TurboManager
+    from vllm_ascend import _ensure_global_patch
+
+    # Model modules must capture Ascend's factory after platform initialization.
+    _ensure_global_patch()
 
     # ops initializes the MoE pipeline, which imports LoRA helpers itself.
     # Loading lora.fused_moe first re-enters it before prepare_lora_indices exists.
@@ -38,8 +42,15 @@ def apply_lora_patch():
 
     from vllm_ascend import envs
     from vllm_ascend.lora import fused_moe, punica_npu, quant_moe
-    from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
+    from vllm_ascend.models.deepseek_v4 import model as deepseek_model
+    from vllm_ascend.patch.platform import patch_fused_moe as moe_factory_patch
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+    # The platform patch only refreshes preloaded vllm.model_executor.models
+    # aliases; an early Ascend model import can retain the original factory.
+    # Assign only this binding: manager propagation would also replace the
+    # platform wrapper's _original_FusedMoE delegate and cause recursion.
+    deepseek_model.FusedMoEFactory = moe_factory_patch._ascend_FusedMoE
 
     from .vllm_ascend import ascend_forward_context as forward_patch
     from .vllm_ascend.lora import fused_moe as fused_patch
@@ -68,8 +79,8 @@ def apply_lora_patch():
     quant_moe._apply_dynamic_int8_moe_lora_overlap_delta = quant_patch._apply_dynamic_int8_moe_lora_overlap_delta
     quant_moe._apply_dynamic_int8_moe_lora_overlap_phase = quant_patch._apply_dynamic_int8_moe_lora_overlap_phase
 
-    AscendDeepseekV4ForCausalLM.lora_skip_prefixes = model_patch.lora_skip_prefixes
-    AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper = model_patch.hf_to_vllm_mapper
+    deepseek_model.AscendDeepseekV4ForCausalLM.lora_skip_prefixes = model_patch.lora_skip_prefixes
+    deepseek_model.AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper = model_patch.hf_to_vllm_mapper
 
     apply_env_patch(envs)
     # The unchanged upstream reset_lora_indices reads this tuple.
