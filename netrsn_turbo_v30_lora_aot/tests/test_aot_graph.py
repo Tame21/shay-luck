@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import logging
 import sys
 from contextlib import contextmanager, nullcontext
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from ._turbo_contract import apply_patches
+from ._turbo_contract import apply_patches, load_payloads
 
 
 @pytest.fixture(params=["qwen3_5_text", "deepseek_v4"])
@@ -100,13 +98,17 @@ def graph_hooks(request, monkeypatch):
 
     methods = (Runner._dummy_run, Runner.maybe_dummy_run_with_lora, Runner.capture_model)
     aliases = stub("_lora_aot_graph_aliases", dummy=methods[0], context=methods[1], capture=methods[2])
-    source = Path(__file__).resolve().parents[1] / "netrsn_turbo/turbo/version_v0300/lora_aot/patches.py"
-    spec = importlib.util.spec_from_file_location("_lora_aot_graph_under_test", source)
-    helper = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, helper)
-    spec.loader.exec_module(helper)
+    helper = load_payloads(monkeypatch).runner
     assert methods == (Runner._dummy_run, Runner.maybe_dummy_run_with_lora, Runner.capture_model)
-    replacements = helper.build_patches()
+    prefix = "vllm_ascend.worker.model_runner_v1.NPUModelRunner"
+    replacements = (
+        (f"{prefix}._dummy_run", helper.wrap_dummy_run(Runner._dummy_run)),
+        (
+            f"{prefix}.maybe_dummy_run_with_lora",
+            helper.wrap_maybe_dummy_run_with_lora(Runner.maybe_dummy_run_with_lora),
+        ),
+        (f"{prefix}.capture_model", helper.wrap_capture_model(Runner.capture_model)),
+    )
     assert methods == (Runner._dummy_run, Runner.maybe_dummy_run_with_lora, Runner.capture_model)
     apply_patches(monkeypatch, replacements)
     helper.test_reapply = lambda: apply_patches(monkeypatch, replacements)

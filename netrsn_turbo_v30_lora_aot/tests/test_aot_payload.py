@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import logging
 import sys
 from contextlib import contextmanager, nullcontext
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from ._turbo_contract import apply_patches
+from ._turbo_contract import apply_patches, load_payloads
 
 
 @pytest.fixture(params=["qwen3_5_text", "deepseek_v4"])
@@ -98,14 +96,17 @@ def harness(request, monkeypatch, tmp_path):
     stub("torch", npu=SimpleNamespace(synchronize=lambda: None))
     stub("vllm_ascend.worker.model_runner_v1", NPUModelRunner=Runner)
     aliases = stub("_lora_aot_aliases", init=init, load=load)
-    source = Path(__file__).resolve().parents[1] / "netrsn_turbo/turbo/version_v0300/lora_aot/patches.py"
-    spec = importlib.util.spec_from_file_location("_lora_aot_under_test", source)
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
+    payloads = load_payloads(monkeypatch)
+    module = payloads.wrapper
     assert Wrapper.__init__ is init
     assert decorators._try_load_aot_compiled_fn is load
-    replacements = module.build_patches()
+    replacements = (
+        ("vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__", module.wrap_init(init)),
+        (
+            "vllm.compilation.decorators._try_load_aot_compiled_fn",
+            payloads.decorators.wrap_try_load_aot_compiled_fn(load),
+        ),
+    )
     assert Wrapper.__init__ is init
     assert decorators._try_load_aot_compiled_fn is load
     apply_patches(monkeypatch, replacements)

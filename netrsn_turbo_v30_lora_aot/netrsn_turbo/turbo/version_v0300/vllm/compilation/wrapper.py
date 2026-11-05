@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build v0.30 LoRA AOT replacements for installation by TurboManager."""
+"""Three-variant AOT state and the vLLM compile-wrapper replacement."""
 
 import inspect
 import os
-from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import wraps
@@ -12,23 +11,17 @@ from types import FunctionType, MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-import torch
 import vllm.envs as vllm_envs
-from vllm.compilation import backends, decorators
-from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-from vllm.config import (
-    CompilationMode,
-    CUDAGraphMode,
-    get_current_vllm_config,
-    set_current_vllm_config,
-)
+from vllm.compilation import backends
+from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config, set_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+
+from .decorators import _variant_decorator_call
 
 logger = init_logger(__name__)
 
 _VARIANTS = ("lora", "base", "base_one")
-_DUMMY_LORA_COUNT_ATTR = "_ascend_aot_dummy_lora_count"
 
 
 def enabled(config) -> bool:
@@ -52,83 +45,6 @@ def enabled(config) -> bool:
         and compilation.backend != "eager"
         and compilation.cudagraph_mode != CUDAGraphMode.NONE
         and compilation.cudagraph_specialize_lora
-    )
-
-
-@contextmanager
-def _dummy_lora_count(runner: Any, count: int) -> Iterator[None]:
-    missing = object()
-    previous = getattr(runner, _DUMMY_LORA_COUNT_ATTR, missing)
-    setattr(runner, _DUMMY_LORA_COUNT_ATTR, count)
-    try:
-        yield
-    finally:
-        if previous is missing:
-            delattr(runner, _DUMMY_LORA_COUNT_ATTR)
-        else:
-            setattr(runner, _DUMMY_LORA_COUNT_ATTR, previous)
-
-
-def build_graph_hooks(runner_cls) -> tuple[tuple[str, Callable], ...]:
-    """Capture existing runner methods without mutating their class."""
-    original_dummy_run = runner_cls._dummy_run
-    original_dummy_lora_context = runner_cls.maybe_dummy_run_with_lora
-    original_capture_model = runner_cls.capture_model
-    dummy_signature = inspect.signature(original_dummy_run)
-    context_signature = inspect.signature(original_dummy_lora_context)
-
-    @wraps(original_dummy_run)
-    def dummy_run(self, *args, **kwargs):
-        if not enabled(self.vllm_config):
-            return original_dummy_run(self, *args, **kwargs)
-
-        count = getattr(self, _DUMMY_LORA_COUNT_ATTR, None)
-        if count is None:
-            bound = dummy_signature.bind(self, *args, **kwargs)
-            # Ordinary profiling must still activate dummy adapters so the
-            # initial compilation and memory estimate include the LoRA path.
-            if not bound.arguments.get("is_profile", False) and "num_active_loras" in bound.arguments:
-                count = bound.arguments["num_active_loras"]
-        if count is None:
-            return original_dummy_run(self, *args, **kwargs)
-
-        with _dummy_lora_count(self, count):
-            return original_dummy_run(self, *args, **kwargs)
-
-    @contextmanager
-    @wraps(original_dummy_lora_context)
-    def maybe_dummy_run_with_lora(self, *args, **kwargs):
-        count = getattr(self, _DUMMY_LORA_COUNT_ATTR, None) if enabled(self.vllm_config) else None
-        if count is not None:
-            bound = context_signature.bind(self, *args, **kwargs)
-            bound.arguments["num_active_loras"] = count
-            context = original_dummy_lora_context(*bound.args, **bound.kwargs)
-        else:
-            context = original_dummy_lora_context(self, *args, **kwargs)
-        with context:
-            yield
-
-    @wraps(original_capture_model)
-    def capture_model(self, *args, **kwargs):
-        if enabled(self.vllm_config):
-            # Compile and execute both base variants before graph-pool capture
-            # and workspace locking. The LoRA variant is prepared by profiling.
-            with _dummy_lora_count(self, 0):
-                if self.max_num_tokens > 1:
-                    self._dummy_run(
-                        num_tokens=self.max_num_tokens,
-                        is_profile=True,
-                        num_active_loras=0,
-                    )
-                self._dummy_run(num_tokens=1, is_profile=True, num_active_loras=0)
-                torch.npu.synchronize()
-        return original_capture_model(self, *args, **kwargs)
-
-    prefix = "vllm_ascend.worker.model_runner_v1.NPUModelRunner"
-    return (
-        (f"{prefix}._dummy_run", dummy_run),
-        (f"{prefix}.maybe_dummy_run_with_lora", maybe_dummy_run_with_lora),
-        (f"{prefix}.capture_model", capture_model),
     )
 
 
@@ -164,30 +80,6 @@ def _clone_forward(model, variant):
     cloned.__kwdefaults__ = original.__kwdefaults__
     cloned.__annotations__ = original.__annotations__
     return MethodType(cloned, model)
-
-
-def _variant_decorator_call(original):
-    """Keep v0.30's compile/load contexts; only skip dynamic marking for base_one."""
-    closure = dict(zip(original.__code__.co_freevars, original.__closure__ or ()))
-    if "_mark_dynamic_inputs" not in closure:
-        raise RuntimeError("LoRA AOT variants require the v0.30 support_torch_compile decorator")
-    mark_dynamic_inputs = closure["_mark_dynamic_inputs"].cell_contents
-
-    def mark_variant_inputs(model, *args, **kwargs):
-        if model._ascend_aot_active_variant != "base_one":
-            mark_dynamic_inputs(model, *args, **kwargs)
-
-    # Build a new cell instead of changing the decorator shared by other models.
-    cell = (lambda: mark_variant_inputs).__closure__[0]
-    cloned = FunctionType(
-        original.__code__,
-        original.__globals__,
-        original.__name__,
-        original.__defaults__,
-        tuple(cell if name == "_mark_dynamic_inputs" else closure[name] for name in original.__code__.co_freevars),
-    )
-    cloned.__kwdefaults__ = original.__kwdefaults__
-    return cloned
 
 
 @dataclass
@@ -314,27 +206,8 @@ def _save_aot_compiled_function(model):
     model._ascend_lora_aot_dispatcher.save(model)
 
 
-def build_patches() -> tuple[tuple[str, Callable], ...]:
-    """Build one replacement set for the runtime selected by the outer router.
-
-    Originals stay in closures or dispatcher attributes so TurboManager's
-    module-level alias propagation cannot replace them with their wrappers.
-    The caller owns registration, application and repeated-load handling.
-    """
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-    original_wrapper_init = TorchCompileWithNoGuardsWrapper.__init__
-    original_load = decorators._try_load_aot_compiled_fn
-
-    @wraps(original_load)
-    def try_load_aot_compiled_fn(model, path):
-        variant = getattr(model, "_ascend_aot_active_variant", None)
-        if variant is None:
-            return original_load(model, path)
-        # The upstream load fast path does not initialize the model's save paths.
-        model._aot_compilation_path = path
-        model._aot_cache_dir = os.path.dirname(path)
-        return original_load(model, f"{path}.{variant}")
+def wrap_init(original_wrapper_init):
+    """Capture the original constructor outside module-level alias propagation."""
 
     @wraps(original_wrapper_init)
     def wrapper_init(self, compile_prefix="", is_encoder=False):
@@ -355,14 +228,4 @@ def build_patches() -> tuple[tuple[str, Callable], ...]:
         self.aot_compiled_fn = self._ascend_lora_aot_dispatcher
         self.save_aot_compiled_function = MethodType(_save_aot_compiled_function, self)
 
-    return (
-        (
-            "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__",
-            wrapper_init,
-        ),
-        (
-            "vllm.compilation.decorators._try_load_aot_compiled_fn",
-            try_load_aot_compiled_fn,
-        ),
-        *build_graph_hooks(NPUModelRunner),
-    )
+    return wrapper_init

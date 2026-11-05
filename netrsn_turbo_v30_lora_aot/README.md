@@ -9,19 +9,32 @@ DeepSeek-V4 的启用条件。它是可合入现有 NetrsnTurbo 工程的增量�
 ```text
 netrsn_turbo_v30_lora_aot/
 ├── netrsn_turbo/
-│   ├── turbo/version_v0300/lora_aot/patches.py
+│   ├── turbo/version_v0300/
+│   │   ├── vllm/compilation/
+│   │   │   ├── wrapper.py
+│   │   │   └── decorators.py
+│   │   └── vllm_ascend/worker/model_runner_v1.py
 │   └── turbo_manager/version_v0300/turbo_lora_aot.py
 ├── tests/
 ├── pyproject.toml
 └── README.md
 ```
 
-- `patches.py` 合并 AOT 分流、缓存读写和图预热逻辑；导入不会安装补丁，
-  `build_patches()` 只构造替换对象。
+- 补丁实现按被修改模块在 vLLM / vLLM Ascend 项目中的原层级放置，
+  不再使用 `lora_aot/patches.py` 聚合文件。导入实现模块不会安装补丁，
+  各 `wrap_*()` 函数只构造对应的替换方法。
 - `turbo_lora_aot.py` 是统一入口：直接构造五个替换对象，逐项注册，再调用
   `TurboManager.apply_patches()`。版本、硬件、补丁组合和调用次数由外层管理。
 - 不需要部署或导入 `vllm_ascend.patch.worker.patch_lora_aot`，也不需要
   `_lora_aot_graph.py`。
+
+相对于 `netrsn_turbo/turbo/version_v0300/` 的实现路径与原项目对应关系：
+
+| 原项目源码 | Turbo 实现路径 | 内容 |
+| --- | --- | --- |
+| `vllm/vllm/compilation/wrapper.py` | `vllm/compilation/wrapper.py` | 三路 dispatcher、编译与保存、wrapper 初始化 |
+| `vllm/vllm/compilation/decorators.py` | `vllm/compilation/decorators.py` | 单 token 动态标记适配、按变体加载缓存 |
+| `vllm-ascend/vllm_ascend/worker/model_runner_v1.py` | `vllm_ascend/worker/model_runner_v1.py` | dummy LoRA 状态和图捕获前预热 |
 
 ## 接入现有工程
 

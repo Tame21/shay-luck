@@ -4,12 +4,33 @@
 
 def apply_lora_aot_patch() -> bool:
     """Install after the outer Turbo router selects the runtime and patch set."""
-    from netrsn_turbo.turbo.version_v0300.lora_aot.patches import build_patches
+    from netrsn_turbo.turbo.version_v0300.vllm.compilation import decorators as decorators_patch
+    from netrsn_turbo.turbo.version_v0300.vllm.compilation import wrapper as wrapper_patch
+    from netrsn_turbo.turbo.version_v0300.vllm_ascend.worker import model_runner_v1 as runner_patch
     from netrsn_turbo.turbo_manager.turbo_utils import TurboManager
+    from vllm.compilation import decorators
+    from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
     from vllm.logger import init_logger
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-    for path, replacement in build_patches():
-        TurboManager.register_patch(path, replacement)
+    TurboManager.register_patch(
+        "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__",
+        wrapper_patch.wrap_init(TorchCompileWithNoGuardsWrapper.__init__),
+    )
+    TurboManager.register_patch(
+        "vllm.compilation.decorators._try_load_aot_compiled_fn",
+        decorators_patch.wrap_try_load_aot_compiled_fn(decorators._try_load_aot_compiled_fn),
+    )
+    runner_wrappers = {
+        "_dummy_run": runner_patch.wrap_dummy_run,
+        "maybe_dummy_run_with_lora": runner_patch.wrap_maybe_dummy_run_with_lora,
+        "capture_model": runner_patch.wrap_capture_model,
+    }
+    for name, wrap in runner_wrappers.items():
+        TurboManager.register_patch(
+            f"vllm_ascend.worker.model_runner_v1.NPUModelRunner.{name}",
+            wrap(getattr(NPUModelRunner, name)),
+        )
     TurboManager.apply_patches()
     init_logger(__name__).info("[Turbo AOT] v0.30.0 base/base_one/lora patches installed via TurboManager")
     return True
