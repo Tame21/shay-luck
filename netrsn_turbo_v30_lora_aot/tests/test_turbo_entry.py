@@ -15,7 +15,6 @@ from ._turbo_contract import apply_patches
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "netrsn_turbo.turbo_manager.version_v0300.turbo_lora_aot"
-PAYLOAD = "netrsn_turbo.turbo.version_v0300.lora_aot.patches"
 
 
 @pytest.fixture
@@ -97,7 +96,7 @@ def make_env(monkeypatch):
             registrations: ClassVar[list] = []
             apply_count = 0
             fail_register = False
-            skip_apply = False
+            fail_apply = False
 
             @classmethod
             def register_patch(cls, path, replacement):
@@ -109,8 +108,9 @@ def make_env(monkeypatch):
             @classmethod
             def apply_patches(cls):
                 cls.apply_count += 1
-                if not cls.skip_apply:
-                    apply_patches(monkeypatch, cls.patches_info.items())
+                if cls.fail_apply:
+                    raise RuntimeError("application failed")
+                apply_patches(monkeypatch, cls.patches_info.items())
 
         module("netrsn_turbo.turbo_manager.turbo_utils", TurboManager=Manager)
         env = SimpleNamespace(
@@ -130,11 +130,13 @@ def make_env(monkeypatch):
 
 
 @pytest.mark.parametrize("version,hardware", [("0.25.1", True), ("0.30.1", True), ("0.31.0", True), ("0.30.0", False)])
-def test_unsupported_runtime_skips_payload_and_registration(make_env, version, hardware):
+def test_runtime_selection_is_delegated_to_outer_router(make_env, monkeypatch, version, hardware):
     env = make_env(version=version, hardware=hardware)
-    assert env.load_entry().apply_lora_aot_patch() is False
-    assert not env.manager.registrations
-    assert PAYLOAD not in sys.modules
+    monkeypatch.delitem(sys.modules, "vllm_ascend.device.hardware_profile")
+    assert env.load_entry().apply_lora_aot_patch() is True
+    assert len(env.manager.registrations) == 6
+    env.wrapper(compile_prefix="outer-selected")
+    assert env.calls[-1] == ("init", "outer-selected", False)
 
 
 @pytest.mark.parametrize("version", ["0.30.0", "0.30.0+local", "0.30.0rc1"])
@@ -155,7 +157,7 @@ def test_entry_registers_all_targets_without_adapter_package_env(make_env, monke
     assert env.calls == [("init", "test", False), ("load", "cache"), ("adapt", True)]
     assert entry.apply_lora_aot_patch()
     assert len(env.manager.registrations) == 6
-    assert env.manager.apply_count == 1
+    assert env.manager.apply_count == 3
 
 
 def test_module_reload_reuses_registered_objects(make_env):
@@ -164,7 +166,7 @@ def test_module_reload_reuses_registered_objects(make_env):
     before = tuple(env.manager.registrations)
     importlib.reload(entry)
     assert tuple(env.manager.registrations) == before
-    assert env.manager.apply_count == 1
+    assert env.manager.apply_count == 2
 
 
 def test_late_native_overwrite_restores_same_replacements(make_env, monkeypatch):
@@ -193,39 +195,31 @@ def test_late_native_overwrite_restores_same_replacements(make_env, monkeypatch)
         ("wrapper", "_external_lora_acl_graph_v23_patch"),
     ],
 )
-def test_existing_conflicting_patch_is_not_wrapped(make_env, owner, marker):
+def test_entry_does_not_validate_external_patch_markers(make_env, owner, marker):
     env = make_env()
     setattr(getattr(env, owner), marker, True)
-    with pytest.raises(RuntimeError, match="restart"):
-        env.load_entry()
-    assert not env.manager.registrations
-    assert PAYLOAD not in sys.modules
+    env.load_entry()
+    assert len(env.manager.registrations) == 6
+    env.wrapper(compile_prefix="outer-selected")
+    assert env.calls[-1] == ("init", "outer-selected", False)
 
 
 @pytest.mark.parametrize("failure", ["registration", "application"])
-def test_failed_install_is_not_marked_successful_or_silently_retried(make_env, failure):
+def test_manager_failure_propagates_and_retry_reuses_replacements(make_env, failure):
     env = make_env()
     env.manager.fail_register = failure == "registration"
-    env.manager.skip_apply = failure == "application"
-    with pytest.raises(RuntimeError, match="registration failed|did not install"):
+    env.manager.fail_apply = failure == "application"
+    with pytest.raises(RuntimeError, match="registration failed|application failed"):
         env.load_entry()
     assert not getattr(env.wrapper, "_ascend_lora_aot_installed", False)
     assert not getattr(env.runner, "_ascend_lora_aot_graph_hooks_installed", False)
+    replacements = env.wrapper._netrsn_turbo_lora_aot_v0300_state.replacements
     env.manager.fail_register = False
-    env.manager.skip_apply = False
-    with pytest.raises(RuntimeError, match="Previous Turbo AOT installation failed"):
-        env.load_entry()
-
-
-def test_competing_registration_after_install_is_reported(make_env, monkeypatch):
-    env = make_env()
+    env.manager.fail_apply = False
     env.load_entry()
-    path = "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__"
-
-    def replacement(self):
-        return None
-
-    env.manager.patches_info[path] = replacement
-    monkeypatch.setattr(env.wrapper, "__init__", replacement)
-    with pytest.raises(RuntimeError, match="competing Turbo registrations"):
-        env.utils.adapt_patch()
+    assert env.wrapper._netrsn_turbo_lora_aot_v0300_state.replacements is replacements
+    assert len(env.manager.registrations) == 6
+    assert env.wrapper._ascend_lora_aot_installed
+    assert env.runner._ascend_lora_aot_graph_hooks_installed
+    env.wrapper(compile_prefix="retry")
+    assert env.calls[-1] == ("init", "retry", False)

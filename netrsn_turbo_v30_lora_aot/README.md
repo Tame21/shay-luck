@@ -18,8 +18,8 @@ netrsn_turbo_v30_lora_aot/
 
 - `patches.py` 合并 AOT 分流、缓存读写和图预热逻辑；导入不会安装补丁，
   `build_patches()` 只构造替换对象。
-- `turbo_lora_aot.py` 是统一入口：检查版本和硬件，通过 TurboManager 注册、应用
-  补丁，并处理重复加载和 VA 原生补丁的加载顺序。
+- `turbo_lora_aot.py` 是统一入口：通过 TurboManager 注册、应用补丁，
+  并处理重复加载和 VA 原生补丁的加载顺序。版本、硬件和补丁组合由外层选择。
 - 不需要部署或导入 `vllm_ascend.patch.worker.patch_lora_aot`，也不需要
   `_lora_aot_graph.py`。
 
@@ -39,7 +39,7 @@ netrsn_turbo_v30_lora_aot/
    重新走到这个入口；父进程打补丁不会自动覆盖新解释器。
 4. 如果之前手工安装了 VA 版本，从 `vllm_ascend/patch/worker/__init__.py`
    移除它的 `import vllm_ascend.patch.worker.patch_lora_aot`，然后重启。
-   当前进程已经安装原生版本时，Turbo 入口会报错，要求重启后选择单一入口。
+   原生与 Turbo 入口的选择由外层负责，本入口不再检查原生安装状态或补丁冲突。
    Turbo 先安装、同版原生文件后导入时，其幂等标记会使原生安装跳过。
 5. 停用此前 v0.23/v0.25 的 LoRA ACL graph 注册入口；其 compiler/graph
    改写与本版本不能叠加。其他无关的 Turbo 补丁可保留。
@@ -53,9 +53,8 @@ adapter 的场景也能安装补丁。实际是否启用三路分流仍由下述
 
 ## 启用范围
 
-运行时门禁使用 `Version(vllm.__version__).release[:3] == (0, 30, 0)`，允许该版本
-的本地版本后缀及预发布后缀，不自动放行 0.30.1 或其他版本。硬件沿用当前 VA 的
-`HardwareCapability.STANDARD_WORKER_PATCHES` 判断。
+实现适配 vLLM v0.30.0 的编译接口；入口不再读取版本号或检查硬件能力，由工程外层
+决定是否导入。模型级 `enabled(config)` 保留以下实际运行条件。
 
 模型白名单：
 
@@ -103,10 +102,12 @@ TurboManager 注册以下六个目标：
 | `vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run` | 传递预热/捕获的 LoRA 数量 |
 | `vllm_ascend.worker.model_runner_v1.NPUModelRunner.maybe_dummy_run_with_lora` | 设置匹配的 dummy LoRA 状态 |
 | `vllm_ascend.worker.model_runner_v1.NPUModelRunner.capture_model` | 捕获前预热 base/base_one |
-| `vllm_ascend.utils.adapt_patch` | 原生 platform/worker 补丁返回后检查、恢复同一组已注册对象 |
+| `vllm_ascend.utils.adapt_patch` | 原生 platform/worker 补丁返回后重应用同一组已注册对象 |
 
 原始函数保存在闭包或 dispatcher 实例属性内，避免 TurboManager 的 `sys.modules`
-引用传播把原始函数替换成补丁自身。每个进程只构造一组稳定的替换对象。
+引用传播把原始函数替换成补丁自身。每个进程只构造一组稳定的替换对象；重复调用
+重应用原有对象，不增加包装层。注册和应用异常原样抛出，重试复用已构建的对象。
+入口不额外校验重复目标或安装结果。
 
 安装成功日志：
 
@@ -129,8 +130,8 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-本地结果：116 项 CPU 测试通过。测试模拟 TurboManager 文档规定的属性替换和模块引用传播，覆盖三路分流、
-缓存重载、编译失败恢复、图预热、模型/版本门禁、重复安装、原生晚覆盖与冲突检测。
+本地结果：115 项 CPU 测试通过。测试模拟 TurboManager 文档规定的属性替换和模块引用传播，覆盖三路分流、
+缓存重载、编译失败恢复、图预热、模型运行条件、外层运行环境选择、重复安装、原生晚覆盖及安装失败重试。
 当前工作区没有完整私有 NetrsnTurbo 引擎，也没有 NPU；仍需在目标环境验证真实
 TurboManager、spawn 加载、AOT 保存/加载、ACL graph 捕获/重放、输出正确性和性能。
 

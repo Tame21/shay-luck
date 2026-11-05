@@ -315,7 +315,7 @@ def _save_aot_compiled_function(model):
 
 
 def build_patches() -> tuple[tuple[str, Callable], ...]:
-    """Build one replacement set after version, device and conflict checks.
+    """Build one replacement set for the runtime selected by the outer router.
 
     Originals stay in closures or dispatcher attributes so TurboManager's
     module-level alias propagation cannot replace them with their wrappers.
