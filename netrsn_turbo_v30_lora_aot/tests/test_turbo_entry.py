@@ -63,8 +63,6 @@ def make_env(monkeypatch):
 
         def adapt_patch(is_global_patch=False):
             calls.append(("adapt", is_global_patch))
-            if env.native_action is not None:
-                env.native_action()
             return "native-result"
 
         module("vllm", __version__=version)
@@ -121,7 +119,6 @@ def make_env(monkeypatch):
             alias=alias,
             manager=Manager,
             calls=calls,
-            native_action=None,
             load_entry=lambda: importlib.import_module(ENTRY),
         )
         return env
@@ -133,8 +130,8 @@ def make_env(monkeypatch):
 def test_runtime_selection_is_delegated_to_outer_router(make_env, monkeypatch, version, hardware):
     env = make_env(version=version, hardware=hardware)
     monkeypatch.delitem(sys.modules, "vllm_ascend.device.hardware_profile")
-    assert env.load_entry().apply_lora_aot_patch() is True
-    assert len(env.manager.registrations) == 6
+    env.load_entry()
+    assert len(env.manager.registrations) == 5
     env.wrapper(compile_prefix="outer-selected")
     assert env.calls[-1] == ("init", "outer-selected", False)
 
@@ -143,11 +140,9 @@ def test_runtime_selection_is_delegated_to_outer_router(make_env, monkeypatch, v
 def test_entry_registers_all_targets_without_adapter_package_env(make_env, monkeypatch, version):
     monkeypatch.delenv("ADAPTATION_PKG_ID", raising=False)
     env = make_env(version=version)
-    entry = env.load_entry()
-    assert len(env.manager.registrations) == 6
+    env.load_entry()
+    assert len(env.manager.registrations) == 5
     assert env.manager.apply_count == 1
-    assert env.wrapper._ascend_lora_aot_installed
-    assert env.runner._ascend_lora_aot_graph_hooks_installed
     assert env.alias.init is env.wrapper.__init__
     assert env.alias.load is env.decorators._try_load_aot_compiled_fn
     assert env.alias.adapt is env.utils.adapt_patch
@@ -155,71 +150,13 @@ def test_entry_registers_all_targets_without_adapter_package_env(make_env, monke
     assert env.decorators._try_load_aot_compiled_fn(SimpleNamespace(), "cache") == "cache"
     assert env.utils.adapt_patch(is_global_patch=True) == "native-result"
     assert env.calls == [("init", "test", False), ("load", "cache"), ("adapt", True)]
-    assert entry.apply_lora_aot_patch()
-    assert len(env.manager.registrations) == 6
-    assert env.manager.apply_count == 3
-
-
-def test_module_reload_reuses_registered_objects(make_env):
-    env = make_env()
-    entry = env.load_entry()
-    before = tuple(env.manager.registrations)
-    importlib.reload(entry)
-    assert tuple(env.manager.registrations) == before
-    assert env.manager.apply_count == 2
-
-
-def test_late_native_overwrite_restores_same_replacements(make_env, monkeypatch):
-    env = make_env()
-    env.load_entry()
-    installed = env.wrapper.__init__
-
-    def overwrite():
-        monkeypatch.setattr(env.wrapper, "__init__", lambda self: None)
-
-    env.native_action = overwrite
-    assert env.alias.adapt(False) == "native-result"
-    assert env.wrapper.__init__ is installed
-    assert env.manager.apply_count == 2
-    assert len(env.manager.registrations) == 6
-    env.wrapper(compile_prefix="restored")
-    assert env.calls[-1] == ("init", "restored", False)
-
-
-@pytest.mark.parametrize(
-    "owner,marker",
-    [
-        ("wrapper", "_ascend_lora_aot_installed"),
-        ("runner", "_ascend_lora_aot_graph_hooks_installed"),
-        ("wrapper", "_ascend_lora_graph_patch_installed"),
-        ("wrapper", "_external_lora_acl_graph_v23_patch"),
-    ],
-)
-def test_entry_does_not_validate_external_patch_markers(make_env, owner, marker):
-    env = make_env()
-    setattr(getattr(env, owner), marker, True)
-    env.load_entry()
-    assert len(env.manager.registrations) == 6
-    env.wrapper(compile_prefix="outer-selected")
-    assert env.calls[-1] == ("init", "outer-selected", False)
+    assert env.manager.apply_count == 1
 
 
 @pytest.mark.parametrize("failure", ["registration", "application"])
-def test_manager_failure_propagates_and_retry_reuses_replacements(make_env, failure):
+def test_manager_failure_propagates(make_env, failure):
     env = make_env()
     env.manager.fail_register = failure == "registration"
     env.manager.fail_apply = failure == "application"
     with pytest.raises(RuntimeError, match="registration failed|application failed"):
         env.load_entry()
-    assert not getattr(env.wrapper, "_ascend_lora_aot_installed", False)
-    assert not getattr(env.runner, "_ascend_lora_aot_graph_hooks_installed", False)
-    replacements = env.wrapper._netrsn_turbo_lora_aot_v0300_state.replacements
-    env.manager.fail_register = False
-    env.manager.fail_apply = False
-    env.load_entry()
-    assert env.wrapper._netrsn_turbo_lora_aot_v0300_state.replacements is replacements
-    assert len(env.manager.registrations) == 6
-    assert env.wrapper._ascend_lora_aot_installed
-    assert env.runner._ascend_lora_aot_graph_hooks_installed
-    env.wrapper(compile_prefix="retry")
-    assert env.calls[-1] == ("init", "retry", False)
