@@ -171,7 +171,7 @@ def test_combined_entry_delegates_once_without_loading_standalone_entries(make_e
     else:
         monkeypatch.setenv("ADAPTATION_PKG_ID", adapter_package)
     calls = []
-    ds = ModuleType("netrsn_turbo.turbo.version_0300.ds_lora")
+    ds = ModuleType("netrsn_turbo.turbo.version_v0300.installer")
     ds.apply_lora_patch = lambda **kwargs: calls.append(kwargs)
     monkeypatch.setitem(sys.modules, ds.__name__, ds)
 
@@ -186,7 +186,7 @@ def test_combined_entry_delegates_once_without_loading_standalone_entries(make_e
 
 def test_combined_entry_propagates_installation_failure(make_env, monkeypatch):
     make_env()
-    ds = ModuleType("netrsn_turbo.turbo.version_0300.ds_lora")
+    ds = ModuleType("netrsn_turbo.turbo.version_v0300.installer")
 
     def fail(**kwargs):
         raise RuntimeError("combined installation failed")

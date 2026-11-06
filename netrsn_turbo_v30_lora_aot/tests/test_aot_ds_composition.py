@@ -3,7 +3,6 @@
 
 import importlib.util
 import linecache
-import runpy
 import sys
 from contextlib import contextmanager
 from functools import wraps
@@ -15,10 +14,6 @@ import pytest
 from ._turbo_contract import apply_patches
 
 ROOT = Path(__file__).resolve().parents[1]
-DS_WORKER = (
-    ROOT.parent / "netrsnturbo_patch_v2/netrsn_turbo/turbo/version_0300/ds_lora/vllm_ascend/worker/model_runner_v1.py"
-)
-pytestmark = pytest.mark.skipif(not DS_WORKER.is_file(), reason="DS LoRA v2 delivery is required for composition tests")
 SOURCE = """\
 import torch
 
@@ -107,7 +102,7 @@ def composed_worker(monkeypatch):
     monkeypatch.setitem(sys.modules, worker_name, helper)
     spec.loader.exec_module(helper)
 
-    ds_rewrite = runpy.run_path(str(DS_WORKER))["_dummy_run"]
+    ds_rewrite = helper._dummy_run
     ds_dummy_run = ds_rewrite(runner_cls._dummy_run)
     replacements = {
         "_dummy_run": helper.wrap_dummy_run(ds_dummy_run),
