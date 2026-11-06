@@ -15,7 +15,6 @@ from ._turbo_contract import apply_patches
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "netrsn_turbo.turbo_manager.version_v0300.turbo_lora_aot"
-COMBINED_ENTRY = "netrsn_turbo.turbo_manager.version_v0300.turbo_ds_lora_aot"
 
 
 @pytest.fixture
@@ -161,37 +160,3 @@ def test_manager_failure_propagates(make_env, failure):
     env.manager.fail_apply = failure == "application"
     with pytest.raises(RuntimeError, match="registration failed|application failed"):
         env.load_entry()
-
-
-@pytest.mark.parametrize("adapter_package", [None, "adapter-package"])
-def test_combined_entry_delegates_once_without_loading_standalone_entries(make_env, monkeypatch, adapter_package):
-    env = make_env()
-    if adapter_package is None:
-        monkeypatch.delenv("ADAPTATION_PKG_ID", raising=False)
-    else:
-        monkeypatch.setenv("ADAPTATION_PKG_ID", adapter_package)
-    calls = []
-    ds = ModuleType("netrsn_turbo.turbo.version_v0300.installer")
-    ds.apply_lora_patch = lambda **kwargs: calls.append(kwargs)
-    monkeypatch.setitem(sys.modules, ds.__name__, ds)
-
-    importlib.import_module(COMBINED_ENTRY)
-
-    assert calls == [{"with_aot": True}]
-    assert env.manager.registrations == []
-    assert env.manager.apply_count == 0
-    assert ENTRY not in sys.modules
-    assert "netrsn_turbo.turbo_manager.version_0300.turbo_ds_lora" not in sys.modules
-
-
-def test_combined_entry_propagates_installation_failure(make_env, monkeypatch):
-    make_env()
-    ds = ModuleType("netrsn_turbo.turbo.version_v0300.installer")
-
-    def fail(**kwargs):
-        raise RuntimeError("combined installation failed")
-
-    ds.apply_lora_patch = fail
-    monkeypatch.setitem(sys.modules, ds.__name__, ds)
-    with pytest.raises(RuntimeError, match="combined installation failed"):
-        importlib.import_module(COMBINED_ENTRY)

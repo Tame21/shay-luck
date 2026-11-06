@@ -2,12 +2,12 @@
 """Import the mirrored patch packages without a torch/vLLM installation."""
 
 from pathlib import Path
-import runpy
 import subprocess
 import sys
 import textwrap
 import unittest
 
+from ._entry_scope import ds_patch_specs
 
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD = ROOT / "netrsn_turbo/turbo/version_v0300"
@@ -24,9 +24,8 @@ class LayoutTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_manifest_paths_mirror_the_upstream_module_hierarchy(self):
-        manifest = runpy.run_path(str(PAYLOAD / "manifest.py"))
-        for upstream, relative, _, _ in manifest["PATCH_SPECS"]:
+    def test_registered_paths_mirror_the_upstream_module_hierarchy(self):
+        for upstream, relative, _, _ in ds_patch_specs():
             with self.subTest(module=upstream):
                 self.assertEqual(relative, upstream)
                 source = PAYLOAD.joinpath(*relative.split(".")).with_suffix(".py")
@@ -78,19 +77,11 @@ class LayoutTests(unittest.TestCase):
             environment = importlib.import_module(prefix + '.vllm_ascend.envs')
             backend_helper = importlib.import_module(prefix + '.vllm_ascend.lora.ops_backend')
             adapters = importlib.import_module(prefix + '.vllm_ascend.lora.lora_ops')
-            installer = importlib.import_module(prefix + '.installer')
-            assert installer.apply_env_patch is environment.apply_env_patch
-            assert installer.initialize_lora_backend is backend_helper.initialize_lora_backend
             assert adapters.get_lora_ops is backend_helper.get_lora_ops
             assert backend_helper._BACKEND is None
             assert 'netrsn_turbo.turbo_ops' not in sys.modules
 
-            parse_calls = []
-            upstream_env = types.SimpleNamespace(env_variables={}, _strict_binary_env=lambda key: parse_calls.append(key))
-            environment.apply_env_patch(upstream_env)
-            assert parse_calls == []
-            upstream_env.env_variables['VLLM_ASCEND_LORA_MOE_OVERLAP']()
-            assert parse_calls == ['VLLM_ASCEND_LORA_MOE_OVERLAP']
+            assert environment.OVERLAP_ENV == 'VLLM_ASCEND_LORA_MOE_OVERLAP'
 
             backend = types.ModuleType('netrsn_turbo.turbo_ops')
             events = []

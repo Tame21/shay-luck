@@ -12,7 +12,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "netrsn_turbo/turbo/version_v0300/installer.py"
+ENTRY = ROOT / "netrsn_turbo/turbo_manager/version_v0300/turbo_ds_lora_aot.py"
 
 # Keep the import edges and their order from the Ascend baseline. The bodies
 # are reduced to inert definitions so Python's real package loader can expose
@@ -72,10 +72,10 @@ class ImportOrderTests(unittest.TestCase):
             result.stderr,
         )
 
-    def test_installer_import_prefix_completes_cold_start(self):
-        tree = ast.parse(INSTALLER.read_text(encoding="utf-8"))
+    def test_manager_import_prefix_completes_cold_start(self):
+        tree = ast.parse(ENTRY.read_text(encoding="utf-8"))
         entry = next(
-            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_lora_patch"
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_ds_lora_aot_patch"
         )
         imports = []
         for node in entry.body:
@@ -88,7 +88,7 @@ class ImportOrderTests(unittest.TestCase):
                     if node.module == "vllm_ascend.lora":
                         break
         else:
-            self.fail("Installer no longer imports the upstream LoRA modules")
+            self.fail("Manager no longer imports the upstream LoRA modules")
 
         source = ast.unparse(ast.Module(body=imports, type_ignores=[]))
         source += (

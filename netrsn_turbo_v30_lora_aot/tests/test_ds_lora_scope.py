@@ -12,15 +12,15 @@ import ast
 import dataclasses
 import pathlib
 import re
-import runpy
 import types
 import unittest
 from enum import Enum, auto
 
+from ._entry_scope import ds_patch_specs
+
 DELIVERY = pathlib.Path(__file__).resolve().parents[1]
 WORKSPACE = DELIVERY.parent
 PAYLOAD = DELIVERY / "netrsn_turbo/turbo/version_v0300"
-MANIFEST = runpy.run_path(str(PAYLOAD / "manifest.py"))
 
 
 def definitions(tree):
@@ -37,7 +37,7 @@ def definitions(tree):
 
 class ScopeTests(unittest.TestCase):
     def test_every_registered_payload_symbol_exists(self):
-        for _, payload_name, existing, additions in MANIFEST["PATCH_SPECS"]:
+        for _, payload_name, existing, additions in ds_patch_specs():
             source = PAYLOAD.joinpath(*payload_name.split(".")).with_suffix(".py")
             tree = ast.parse(source.read_text(encoding="utf-8"))
             exported = set(definitions(tree))
@@ -61,7 +61,7 @@ class ScopeTests(unittest.TestCase):
         ds = WORKSPACE / "vllm-ascend-ds-v2/vllm_ascend"
         accounted = {
             f"{module}.{symbol}"
-            for module, _, existing, additions in MANIFEST["PATCH_SPECS"]
+            for module, _, existing, additions in ds_patch_specs()
             for symbol in existing + additions
         }
         # This function's delta fixes base checkpoint bookkeeping, not LoRA.
@@ -80,7 +80,7 @@ class ScopeTests(unittest.TestCase):
                         self.assertIn(f"{module}.{symbol}", accounted | excluded)
 
     def test_worker_patch_is_limited_to_dummy_run(self):
-        worker_specs = [spec for spec in MANIFEST["PATCH_SPECS"] if ".worker." in spec[0]]
+        worker_specs = [spec for spec in ds_patch_specs() if ".worker." in spec[0]]
         self.assertEqual(
             worker_specs,
             [
@@ -94,7 +94,7 @@ class ScopeTests(unittest.TestCase):
         )
 
     def test_no_unrelated_model_function_is_patched(self):
-        model_specs = [spec for spec in MANIFEST["PATCH_SPECS"] if ".models." in spec[0]]
+        model_specs = [spec for spec in ds_patch_specs() if ".models." in spec[0]]
         self.assertEqual(len(model_specs), 1)
         self.assertEqual(model_specs[0][0], "vllm_ascend.models.deepseek_v4.model")
         self.assertEqual(model_specs[0][2], ())

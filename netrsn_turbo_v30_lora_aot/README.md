@@ -11,7 +11,6 @@
 netrsn_turbo_v30_lora_aot/
 ├── netrsn_turbo/
 │   ├── turbo/version_v0300/
-│   │   ├── installer.py / manifest.py
 │   │   ├── vllm/compilation/
 │   │   │   ├── wrapper.py
 │   │   │   └── decorators.py
@@ -40,8 +39,9 @@ netrsn_turbo_v30_lora_aot/
   各 `wrap_*()` 函数只构造对应的替换方法。
 - `turbo_lora_aot.py` 是独立 AOT 入口：直接构造五个替换对象，逐项注册，再调用
   `TurboManager.apply_patches()`。版本、硬件、补丁组合和调用次数由外层管理。
-- `turbo_ds_lora_aot.py` 是联合入口，使用本目录内的 `version_v0300.installer`，
-  组合 DS worker 改写和 AOT 包装，注册 24 个不同目标后统一应用一次。
+- `turbo_ds_lora_aot.py` 是联合入口，直接展开所有属性赋值和 24 个目标的
+  `TurboManager.register_patch()` 调用，组合 DS worker 改写和 AOT 包装后统一应用一次。
+  注册逻辑全部位于 `turbo_manager`，没有独立安装器或补丁映射清单。
 - DS 和 AOT 实现共用 `version_v0300`，DS 的源码改写与 AOT wrapper 位于同一个
   `vllm_ascend/worker/model_runner_v1.py`。内部导入不经过旧版本目录或额外的
   `ds_lora` 包。
@@ -80,7 +80,7 @@ netrsn_turbo_v30_lora_aot/
    注册入口，统一由上述联合入口安装。其他无关的 Turbo 补丁可保留。
 6. 按下文将 `turbo_ops` 构建 helper 接入主仓 `setup.py`，在匹配运行环境中构建 wheel。
 
-联合入口导入时自动执行 `apply_lora_patch(with_aot=True)`。外层负责每个 worker 的单次安装，
+联合入口导入时自动执行本文件内的 `apply_ds_lora_aot_patch()`。外层负责每个 worker 的单次安装，
 不再额外调用该函数或 reload 入口。不依赖 `ADAPTATION_PKG_ID`，因此服务先启动、运行时再加载
 adapter 的场景也能安装补丁。实际是否启用三路分流仍由下述模型配置决定。
 
@@ -89,13 +89,11 @@ adapter 的场景也能安装补丁。实际是否启用三路分流仍由下述
 
 ## 联合安装的行为
 
-联合 installer 先对原始 `_dummy_run` 做 DS 单点源码改写，再构造 AOT 包装，
+联合入口先对原始 `_dummy_run` 做 DS 单点源码改写，再构造 AOT 包装，
 最终 `_dummy_run` 只注册一次。其余 19 个 DS 目标和 4 个 AOT 目标一起注册，
 最后执行一次 `TurboManager.apply_patches()`，随后更新 W8A8 的冻结注册项。
 仅使用三路 AOT 的模型可由外层选择 `turbo_lora_aot` 入口，安装五个 AOT 目标。
-仅使用 DS 的部署可在原有 LoRA 分支调用
-`netrsn_turbo.turbo.version_v0300.installer.apply_lora_patch()`，安装 20 个 DS 目标。
-这些安装方式由外层择一使用；入口不添加版本、硬件或重复安装检查。
+这两个入口由外层择一使用；入口不添加版本、硬件或重复安装检查。
 
 LoRA 数量统一按以下优先级传递给 `_dummy_run` 方法体及 dummy adapter context：
 

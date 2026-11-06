@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-import runpy
 import sys
 import types
 import unittest
 from unittest import mock
 
+from ._entry_scope import ds_patch_specs
 
 DELIVERY = Path(__file__).resolve().parents[1]
 WORKSPACE = DELIVERY.parent
@@ -133,7 +133,7 @@ class BaseHelperPreservationTests(unittest.TestCase):
         }
         self.assertTrue({"_LORA_WRAPPERS", "_LORA_WRAPPER_IDS", "lora_linear"}.issubset(imports))
         payload_functions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-        specs = runpy.run_path(str(PAYLOAD / "manifest.py"))["PATCH_SPECS"]
+        specs = ds_patch_specs()
         registered = {symbol for module, _, existing, additions in specs for symbol in existing + additions}
         for name in BASE_HELPERS:
             with self.subTest(helper=name):

@@ -16,7 +16,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "netrsn_turbo/turbo/version_v0300/installer.py"
+ENTRY = ROOT / "netrsn_turbo/turbo_manager/version_v0300/turbo_ds_lora_aot.py"
 
 MODULES = {
     "netrsn_turbo/__init__.py": "",
@@ -90,18 +90,18 @@ class RouterImportOrderTests(unittest.TestCase):
             timeout=30,
         )
 
-    def installer_prefix(self):
-        tree = ast.parse(INSTALLER.read_text(encoding="utf-8"))
+    def manager_prefix(self):
+        tree = ast.parse(ENTRY.read_text(encoding="utf-8"))
         entry = next(
-            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_lora_patch"
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_ds_lora_aot_patch"
         )
         prefix = []
         for node in entry.body:
-            if isinstance(node, ast.ImportFrom) and node.level:
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("netrsn_turbo.turbo.version_v0300"):
                 break
             prefix.append(node)
         else:
-            self.fail("Installer no longer has an upstream initialization prefix")
+            self.fail("Manager no longer has an upstream initialization prefix")
         return ast.unparse(ast.Module(body=prefix, type_ignores=[]))
 
     def test_late_platform_patch_leaves_ascend_model_factory_stale(self):
@@ -119,7 +119,7 @@ class RouterImportOrderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("'_moe_C' object has no attribute 'topk_softplus_sqrt'", result.stderr)
 
-    def assert_installer_routes_to_ascend(self, preload_model):
+    def assert_manager_routes_to_ascend(self, preload_model):
         source = (
             "from vllm.model_executor.layers.fused_moe import layer\n"
             "original = layer.FusedMoEFactory\n"
@@ -130,7 +130,7 @@ class RouterImportOrderTests(unittest.TestCase):
                 "from vllm_ascend.models.deepseek_v4 import model as early_model\n"
                 "assert early_model.FusedMoEFactory is original\n"
             )
-        source += self.installer_prefix()
+        source += self.manager_prefix()
         source += (
             "\nfrom vllm_ascend.models.deepseek_v4 import model\n"
             "from vllm_ascend.patch.platform import patch_fused_moe\n"
@@ -144,11 +144,11 @@ class RouterImportOrderTests(unittest.TestCase):
         result = self.run_imports(source)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_installer_cold_start_uses_ascend_factory(self):
-        self.assert_installer_routes_to_ascend(preload_model=False)
+    def test_manager_cold_start_uses_ascend_factory(self):
+        self.assert_manager_routes_to_ascend(preload_model=False)
 
-    def test_installer_refreshes_preloaded_model_without_rewriting_original(self):
-        self.assert_installer_routes_to_ascend(preload_model=True)
+    def test_manager_refreshes_preloaded_model_without_rewriting_original(self):
+        self.assert_manager_routes_to_ascend(preload_model=True)
 
 
 if __name__ == "__main__":

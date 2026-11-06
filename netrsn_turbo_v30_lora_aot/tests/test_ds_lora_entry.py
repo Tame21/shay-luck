@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from functools import wraps
 from unittest.mock import patch
 
+from ._entry_scope import ENTRY, ds_patch_specs, registration_targets
+
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_DIR = ROOT / "netrsn_turbo/turbo/version_v0300"
-TEST_PACKAGE = "_ds_lora_installer_under_test"
+TEST_PACKAGE = "netrsn_turbo.turbo.version_v0300"
+ENTRY_MODULE = "netrsn_turbo.turbo_manager.version_v0300.turbo_ds_lora_aot"
 OVERLAP_ENV = "VLLM_ASCEND_LORA_MOE_OVERLAP"
-PATCH_SPECS = runpy.run_path(str(PAYLOAD_DIR / "manifest.py"))["PATCH_SPECS"]
+PATCH_SPECS = ds_patch_specs()
 WORKER_PATH = "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run"
 INIT_PATH = "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.__init__"
 AOT_TARGETS = (
@@ -28,11 +31,6 @@ AOT_TARGETS = (
     "vllm_ascend.worker.model_runner_v1.NPUModelRunner.maybe_dummy_run_with_lora",
     "vllm_ascend.worker.model_runner_v1.NPUModelRunner.capture_model",
 )
-
-package = types.ModuleType(TEST_PACKAGE)
-package.__path__ = [str(PAYLOAD_DIR)]
-sys.modules[TEST_PACKAGE] = package
-installer = importlib.import_module(f"{TEST_PACKAGE}.installer")
 
 
 def resolve(path):
@@ -91,7 +89,7 @@ class Implementation:
     validate_activation_input: object
 
 
-class InstallerTests(unittest.TestCase):
+class CombinedEntryTests(unittest.TestCase):
     def setUp(self):
         modules = patch.dict(sys.modules)
         modules.start()
@@ -209,6 +207,35 @@ class InstallerTests(unittest.TestCase):
             return self.envs.env_variables[name]()
 
         self.envs.__getattr__ = read_environment
+        self.add_aot_payloads()
+        for relative, symbol in (
+            ("vllm_ascend.envs", "OVERLAP_ENV"),
+            ("vllm_ascend.lora.ops_backend", "initialize_lora_backend"),
+        ):
+            helper = runpy.run_path(str(PAYLOAD_DIR.joinpath(*relative.split(".")).with_suffix(".py")))
+            self.add_module(f"{TEST_PACKAGE}.{relative}", **{symbol: helper[symbol]})
+
+        # Keep helpers patchable in unit tests without applying on module load.
+        # The separate import tests execute the unmodified real entry below.
+        self.entry = self.add_module("_ds_lora_manager_entry_under_test")
+        tree = ast.parse(ENTRY.read_text(encoding="utf-8"))
+        tree.body = [
+            node
+            for node in tree.body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "apply_ds_lora_aot_patch"
+            )
+        ]
+        exec(compile(tree, str(ENTRY), "exec"), vars(self.entry))
+
+    def import_entry(self):
+        manager_package = self.add_module("netrsn_turbo.turbo_manager.version_v0300", package=True)
+        manager_package.__path__ = [str(ENTRY.parent)]
+        sys.modules.pop(ENTRY_MODULE, None)
+        return importlib.import_module(ENTRY_MODULE)
 
     def add_module(self, name, package=False, **values):
         parent_name, _, child = name.rpartition(".")
@@ -224,14 +251,14 @@ class InstallerTests(unittest.TestCase):
             setattr(sys.modules[parent_name], child, result)
         return result
 
-    def test_explicit_registrations_cover_manifest_and_apply_once(self):
+    def test_explicit_registrations_cover_combined_scope_and_apply_once(self):
         before = list(sys.meta_path)
-        with patch.object(installer, "initialize_lora_backend") as initialize:
-            result = installer.apply_lora_patch()
+        with patch.object(self.entry, "initialize_lora_backend") as initialize:
+            result = self.entry.apply_ds_lora_aot_patch()
         expected = [f"{module}.{path}" for module, _, existing, _ in PATCH_SPECS for path in existing]
         self.assertIsNone(result)
         self.assertEqual(len(expected), 20)
-        self.assertCountEqual(self.manager.registrations, expected)
+        self.assertCountEqual(self.manager.registrations, [*expected, *AOT_TARGETS])
         self.assertEqual(self.manager.apply_count, 1)
         self.assertEqual(self.platform_init_calls, ["platform"])
         self.assertEqual(sys.meta_path, before)
@@ -239,13 +266,13 @@ class InstallerTests(unittest.TestCase):
         for path in expected:
             owner, attribute = resolve(path)
             actual = getattr(owner, attribute)
-            if path == INIT_PATH:
+            if path in (INIT_PATH, WORKER_PATH):
                 self.assertIs(actual.__wrapped__, self.replacements[path])
             else:
                 self.assertIs(actual, self.replacements[path])
 
     def test_deepseek_factory_binding_uses_ascend_without_replacing_its_delegate(self):
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         model_module = self.sources["vllm_ascend.models.deepseek_v4.model"]
         self.assertIs(model_module.FusedMoEFactory, self.ascend_factory)
         self.assertIs(self.factory_patch._original_FusedMoE, self.generic_factory)
@@ -253,7 +280,7 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(any(path.endswith("FusedMoEFactory") for path in self.manager.registrations))
 
     def test_preimported_references_and_quant_helper_globals_follow_manager(self):
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         for index, path in enumerate(self.originals):
             owner, attribute = resolve(path)
             self.assertIs(getattr(self.witness, f"reference_{index}"), getattr(owner, attribute))
@@ -262,7 +289,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_additions_bind_to_target_without_propagating_shared_defaults(self):
         defaults = self.base_model.lora_skip_prefixes
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         additions = [f"{module}.{path}" for module, _, _, added in PATCH_SPECS for path in added]
         self.assertEqual(len(additions), 13)
         for path in additions:
@@ -280,7 +307,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_quant_registry_replaces_frozen_entry_and_preserves_validator(self):
         original_apply = self.original_impl.apply
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         actual = self.quant._QUANT_MOE_LORA_IMPLS["int8"]
         self.assertIs(actual.apply, self.quant._apply_dynamic_int8_moe_lora)
         self.assertIs(actual.validate_activation_input, self.validator)
@@ -290,7 +317,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_combined_index_is_added_to_original_reset_lifecycle(self):
         reset = self.fused.reset
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         context = types.SimpleNamespace(
             split_lora_indices=1,
             exchanged_lora_indices=2,
@@ -303,7 +330,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.fused._MOE_LORA_INDEX_FIELDS.count("combined_lora_idx"), 1)
 
     def test_overlap_environment_is_lazy_strict_and_preserves_other_variables(self):
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         self.assertEqual(self.parser_calls, [])
         self.assertIs(self.envs.env_variables["EXISTING_SETTING"], self.existing_getter)
         with patch.dict(os.environ, {}, clear=True):
@@ -323,16 +350,16 @@ class InstallerTests(unittest.TestCase):
     def test_existing_overlap_getter_is_not_overwritten(self):
         getter = function("configured")
         self.envs.env_variables[OVERLAP_ENV] = getter
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         self.assertIs(self.envs.env_variables[OVERLAP_ENV], getter)
 
     def test_custom_ops_check_initializes_backend_and_propagates_failure(self):
-        with patch.object(installer, "initialize_lora_backend") as initialize:
-            installer.check_custom_ops()
+        with patch.object(self.entry, "initialize_lora_backend") as initialize:
+            self.entry.check_custom_ops()
             initialize.assert_called_once_with()
-        with patch.object(installer, "initialize_lora_backend", side_effect=RuntimeError("native component missing")):
+        with patch.object(self.entry, "initialize_lora_backend", side_effect=RuntimeError("native component missing")):
             with self.assertRaisesRegex(RuntimeError, "native component missing"):
-                installer.check_custom_ops()
+                self.entry.check_custom_ops()
 
     def test_registered_constructor_checks_backend_before_payload_initialization(self):
         calls = []
@@ -341,22 +368,22 @@ class InstallerTests(unittest.TestCase):
             calls.append(argument)
 
         self.payloads["vllm_ascend.lora.punica_npu"].__init__ = initialize
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         punica = self.sources["vllm_ascend.lora.punica_npu"].PunicaWrapperNPU
-        with patch.object(installer, "check_custom_ops", side_effect=RuntimeError("missing")):
+        with patch.object(self.entry, "check_custom_ops", side_effect=RuntimeError("missing")):
             with self.assertRaisesRegex(RuntimeError, "missing"):
                 punica(3)
         self.assertEqual(calls, [])
-        with patch.object(installer, "check_custom_ops") as check:
+        with patch.object(self.entry, "check_custom_ops") as check:
             punica(7)
             check.assert_called_once_with()
         self.assertEqual(calls, [7])
         self.assertIs(punica.__init__.__wrapped__, initialize)
 
     def test_worker_factory_receives_original_and_registers_its_result(self):
-        installer.apply_lora_patch()
+        self.entry.apply_ds_lora_aot_patch()
         self.assertEqual(self.factory_calls, [self.originals[WORKER_PATH]])
-        self.assertIs(self.worker._dummy_run, self.replacements[WORKER_PATH])
+        self.assertIs(self.worker._dummy_run.__wrapped__, self.replacements[WORKER_PATH])
         self.assertEqual(self.worker()._dummy_run(1), ("patched", WORKER_PATH))
 
     def test_worker_factory_failure_propagates_before_final_apply(self):
@@ -366,7 +393,7 @@ class InstallerTests(unittest.TestCase):
 
         self.payloads["vllm_ascend.worker.model_runner_v1"]._dummy_run = factory
         with self.assertRaisesRegex(RuntimeError, "worker baseline mismatch"):
-            installer.apply_lora_patch()
+            self.entry.apply_ds_lora_aot_patch()
         self.assertIs(self.worker._dummy_run, self.originals[WORKER_PATH])
         self.assertEqual(self.manager.apply_count, 0)
 
@@ -409,8 +436,7 @@ class InstallerTests(unittest.TestCase):
             setattr(self.witness, f"aot_reference_{index}", self.aot_originals[path])
 
     def test_combined_install_wraps_ds_worker_and_registers_each_target_once(self):
-        self.add_aot_payloads()
-        installer.apply_lora_patch(with_aot=True)
+        self.entry.apply_ds_lora_aot_patch()
         expected = [f"{module}.{path}" for module, _, existing, _ in PATCH_SPECS for path in existing]
         self.assertCountEqual(self.manager.registrations, [*expected, *AOT_TARGETS])
         self.assertEqual(len(set(self.manager.registrations)), 24)
@@ -438,8 +464,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(sys.modules["vllm.compilation.decorators"]._try_load_aot_compiled_fn(), "loaded")
 
     def test_combined_install_preserves_quant_finalize_and_avoids_standalone_entries(self):
-        self.add_aot_payloads()
-        installer.apply_lora_patch(with_aot=True)
+        self.entry.apply_ds_lora_aot_patch()
         self.assertEqual(self.platform_init_calls, ["platform"])
         actual = self.quant._QUANT_MOE_LORA_IMPLS["int8"]
         self.assertIs(actual.apply, self.quant._apply_dynamic_int8_moe_lora)
@@ -449,18 +474,40 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("netrsn_turbo.turbo_manager.version_v0300.turbo_lora_aot", sys.modules)
 
     def test_combined_aot_factory_failure_leaves_worker_unapplied(self):
-        self.add_aot_payloads()
         with patch.object(self.aot_worker, "wrap_dummy_run", side_effect=RuntimeError("AOT factory failed")):
             with self.assertRaisesRegex(RuntimeError, "AOT factory failed"):
-                installer.apply_lora_patch(with_aot=True)
+                self.entry.apply_ds_lora_aot_patch()
         self.assertIs(self.worker._dummy_run, self.originals[WORKER_PATH])
         self.assertEqual(self.factory_calls, [self.originals[WORKER_PATH]])
         self.assertEqual(self.manager.apply_count, 0)
 
+    def test_real_entry_import_applies_all_replacements_once_without_adapter_env(self):
+        with patch.dict(os.environ, {}, clear=True):
+            entry = self.import_entry()
+        self.assertIsNone(getattr(entry, "installer", None))
+        self.assertEqual(self.manager.apply_count, 1)
+        self.assertEqual(len(self.manager.registrations), 24)
+        self.assertEqual(len(set(self.manager.registrations)), 24)
+        self.assertCountEqual(self.manager.registrations, registration_targets())
+        self.assertEqual(self.manager.registrations.count(WORKER_PATH), 1)
+        self.assertEqual(self.factory_calls, [self.originals[WORKER_PATH]])
+        self.assertEqual(self.worker()._dummy_run(1), ("patched", WORKER_PATH))
+        self.assertIs(importlib.import_module(ENTRY_MODULE), entry)
+        self.assertEqual(self.manager.apply_count, 1)
+        self.assertNotIn("netrsn_turbo.turbo.version_v0300.installer", sys.modules)
+        self.assertNotIn("netrsn_turbo.turbo_manager.version_v0300.turbo_lora_aot", sys.modules)
+
+    def test_real_entry_import_propagates_application_failure(self):
+        with patch.object(self.manager, "apply_patches", side_effect=RuntimeError("application failed")):
+            with self.assertRaisesRegex(RuntimeError, "application failed"):
+                self.import_entry()
+        self.assertNotIn(ENTRY_MODULE, sys.modules)
+        self.assertIs(self.worker._dummy_run, self.originals[WORKER_PATH])
+
     def test_register_patch_targets_are_explicit_string_literals(self):
-        tree = ast.parse((PAYLOAD_DIR / "installer.py").read_text(encoding="utf-8"))
+        tree = ast.parse(ENTRY.read_text(encoding="utf-8"))
         entry = next(
-            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_lora_patch"
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_ds_lora_aot_patch"
         )
         registrations = [
             node

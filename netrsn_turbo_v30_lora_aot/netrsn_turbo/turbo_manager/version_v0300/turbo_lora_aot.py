@@ -21,16 +21,18 @@ def apply_lora_aot_patch() -> bool:
         "vllm.compilation.decorators._try_load_aot_compiled_fn",
         decorators_patch.wrap_try_load_aot_compiled_fn(decorators._try_load_aot_compiled_fn),
     )
-    runner_wrappers = {
-        "_dummy_run": runner_patch.wrap_dummy_run,
-        "maybe_dummy_run_with_lora": runner_patch.wrap_maybe_dummy_run_with_lora,
-        "capture_model": runner_patch.wrap_capture_model,
-    }
-    for name, wrap in runner_wrappers.items():
-        TurboManager.register_patch(
-            f"vllm_ascend.worker.model_runner_v1.NPUModelRunner.{name}",
-            wrap(getattr(NPUModelRunner, name)),
-        )
+    TurboManager.register_patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run",
+        runner_patch.wrap_dummy_run(NPUModelRunner._dummy_run),
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner.maybe_dummy_run_with_lora",
+        runner_patch.wrap_maybe_dummy_run_with_lora(NPUModelRunner.maybe_dummy_run_with_lora),
+    )
+    TurboManager.register_patch(
+        "vllm_ascend.worker.model_runner_v1.NPUModelRunner.capture_model",
+        runner_patch.wrap_capture_model(NPUModelRunner.capture_model),
+    )
     TurboManager.apply_patches()
     init_logger(__name__).info("[Turbo AOT] v0.30.0 base/base_one/lora patches installed via TurboManager")
     return True
