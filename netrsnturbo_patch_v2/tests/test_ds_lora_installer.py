@@ -12,6 +12,7 @@ import sys
 import types
 import unittest
 from dataclasses import dataclass
+from functools import wraps
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,12 @@ OVERLAP_ENV = "VLLM_ASCEND_LORA_MOE_OVERLAP"
 PATCH_SPECS = runpy.run_path(str(PAYLOAD_DIR / "manifest.py"))["PATCH_SPECS"]
 WORKER_PATH = "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run"
 INIT_PATH = "vllm_ascend.lora.punica_npu.PunicaWrapperNPU.__init__"
+AOT_TARGETS = (
+    "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__",
+    "vllm.compilation.decorators._try_load_aot_compiled_fn",
+    "vllm_ascend.worker.model_runner_v1.NPUModelRunner.maybe_dummy_run_with_lora",
+    "vllm_ascend.worker.model_runner_v1.NPUModelRunner.capture_model",
+)
 
 package = types.ModuleType(TEST_PACKAGE)
 package.__path__ = [str(PAYLOAD_DIR)]
@@ -351,6 +358,94 @@ class InstallerTests(unittest.TestCase):
         self.assertIs(self.worker._dummy_run, self.originals[WORKER_PATH])
         self.assertEqual(self.manager.apply_count, 0)
 
+    def add_aot_payloads(self):
+        """Provide wrapping factories while retaining the manager's alias propagation."""
+        prefix = "netrsn_turbo.turbo.version_v0300"
+        self.aot_calls = []
+
+        def factory(path):
+            def wrap(original):
+                self.assertEqual(self.manager.apply_count, 0)
+                self.aot_calls.append((path, original))
+
+                @wraps(original)
+                def replacement(*args, **kwargs):
+                    return original(*args, **kwargs)
+
+                return replacement
+            return wrap
+
+        wrapper = type("Wrapper", (), {"__init__": lambda self: None})
+        self.add_module("vllm.compilation.wrapper", TorchCompileWithNoGuardsWrapper=wrapper)
+        self.add_module("vllm.compilation.decorators", _try_load_aot_compiled_fn=function("loaded"))
+        self.worker.maybe_dummy_run_with_lora = function("context")
+        self.worker.capture_model = function("captured")
+        self.add_module(prefix + ".vllm.compilation.wrapper", wrap_init=factory(AOT_TARGETS[0]))
+        self.add_module(
+            prefix + ".vllm.compilation.decorators",
+            wrap_try_load_aot_compiled_fn=factory(AOT_TARGETS[1]),
+        )
+        self.aot_worker = self.add_module(
+            prefix + ".vllm_ascend.worker.model_runner_v1",
+            wrap_dummy_run=factory(WORKER_PATH),
+            wrap_maybe_dummy_run_with_lora=factory(AOT_TARGETS[2]),
+            wrap_capture_model=factory(AOT_TARGETS[3]),
+        )
+        self.aot_originals = {}
+        for index, path in enumerate(AOT_TARGETS):
+            owner, attribute = resolve(path)
+            self.aot_originals[path] = getattr(owner, attribute)
+            setattr(self.witness, f"aot_reference_{index}", self.aot_originals[path])
+
+    def test_combined_install_wraps_ds_worker_and_registers_each_target_once(self):
+        self.add_aot_payloads()
+        installer.apply_lora_patch(with_aot=True)
+        expected = [f"{module}.{path}" for module, _, existing, _ in PATCH_SPECS for path in existing]
+        self.assertCountEqual(self.manager.registrations, [*expected, *AOT_TARGETS])
+        self.assertEqual(len(set(self.manager.registrations)), 24)
+        self.assertEqual(self.manager.registrations.count(WORKER_PATH), 1)
+        self.assertEqual(self.manager.apply_count, 1)
+        self.assertEqual(self.factory_calls, [self.originals[WORKER_PATH]])
+        self.assertCountEqual(
+            self.aot_calls,
+            [(WORKER_PATH, self.replacements[WORKER_PATH]), *self.aot_originals.items()],
+        )
+        self.assertIs(self.worker._dummy_run.__wrapped__, self.replacements[WORKER_PATH])
+        self.assertEqual(self.worker()._dummy_run(1), ("patched", WORKER_PATH))
+        for index, path in enumerate(AOT_TARGETS):
+            owner, attribute = resolve(path)
+            actual = getattr(owner, attribute)
+            self.assertIs(actual.__wrapped__, self.aot_originals[path])
+            self.assertIs(getattr(self.witness, f"aot_reference_{index}"), actual)
+        for index, path in enumerate(self.originals):
+            owner, attribute = resolve(path)
+            self.assertIs(getattr(self.witness, f"reference_{index}"), getattr(owner, attribute))
+        self.assertEqual(self.worker().capture_model(), "captured")
+        self.assertEqual(self.worker().maybe_dummy_run_with_lora(), "context")
+        wrapper = sys.modules["vllm.compilation.wrapper"].TorchCompileWithNoGuardsWrapper
+        self.assertIsInstance(wrapper(), wrapper)
+        self.assertEqual(sys.modules["vllm.compilation.decorators"]._try_load_aot_compiled_fn(), "loaded")
+
+    def test_combined_install_preserves_quant_finalize_and_avoids_standalone_entries(self):
+        self.add_aot_payloads()
+        installer.apply_lora_patch(with_aot=True)
+        self.assertEqual(self.platform_init_calls, ["platform"])
+        actual = self.quant._QUANT_MOE_LORA_IMPLS["int8"]
+        self.assertIs(actual.apply, self.quant._apply_dynamic_int8_moe_lora)
+        self.assertIs(actual.validate_activation_input, self.validator)
+        self.assertIs(self.quant._QUANT_MOE_LORA_IMPLS["other"], self.other_impl)
+        self.assertNotIn("netrsn_turbo.turbo_manager.version_0300.turbo_ds_lora", sys.modules)
+        self.assertNotIn("netrsn_turbo.turbo_manager.version_v0300.turbo_lora_aot", sys.modules)
+
+    def test_combined_aot_factory_failure_leaves_worker_unapplied(self):
+        self.add_aot_payloads()
+        with patch.object(self.aot_worker, "wrap_dummy_run", side_effect=RuntimeError("AOT factory failed")):
+            with self.assertRaisesRegex(RuntimeError, "AOT factory failed"):
+                installer.apply_lora_patch(with_aot=True)
+        self.assertIs(self.worker._dummy_run, self.originals[WORKER_PATH])
+        self.assertEqual(self.factory_calls, [self.originals[WORKER_PATH]])
+        self.assertEqual(self.manager.apply_count, 0)
+
     def test_register_patch_targets_are_explicit_string_literals(self):
         tree = ast.parse((PAYLOAD_DIR / "installer.py").read_text(encoding="utf-8"))
         entry = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
@@ -361,7 +456,8 @@ class InstallerTests(unittest.TestCase):
             and node.func.attr == "register_patch"
         ]
         expected = [f"{module}.{path}" for module, _, existing, _ in PATCH_SPECS for path in existing]
-        self.assertEqual(len(registrations), 20)
+        expected.extend(AOT_TARGETS)
+        self.assertEqual(len(registrations), 24)
         self.assertTrue(all(isinstance(call.args[0], ast.Constant)
                             and isinstance(call.args[0].value, str) for call in registrations))
         self.assertCountEqual([call.args[0].value for call in registrations], expected)

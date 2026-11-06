@@ -14,7 +14,9 @@ netrsn_turbo_v30_lora_aot/
 │   │   │   ├── wrapper.py
 │   │   │   └── decorators.py
 │   │   └── vllm_ascend/worker/model_runner_v1.py
-│   └── turbo_manager/version_v0300/turbo_lora_aot.py
+│   └── turbo_manager/version_v0300/
+│       ├── turbo_lora_aot.py
+│       └── turbo_ds_lora_aot.py
 ├── tests/
 ├── pyproject.toml
 └── README.md
@@ -23,8 +25,10 @@ netrsn_turbo_v30_lora_aot/
 - 补丁实现按被修改模块在 vLLM / vLLM Ascend 项目中的原层级放置，
   不再使用 `lora_aot/patches.py` 聚合文件。导入实现模块不会安装补丁，
   各 `wrap_*()` 函数只构造对应的替换方法。
-- `turbo_lora_aot.py` 是统一入口：直接构造五个替换对象，逐项注册，再调用
+- `turbo_lora_aot.py` 是独立 AOT 入口：直接构造五个替换对象，逐项注册，再调用
   `TurboManager.apply_patches()`。版本、硬件、补丁组合和调用次数由外层管理。
+- `turbo_ds_lora_aot.py` 是与 `netrsnturbo_patch_v2` 配套的联合入口，组合 DS worker
+  改写和 AOT 包装，注册 24 个不同目标后统一应用一次。
 - 不需要部署或导入 `vllm_ascend.patch.worker.patch_lora_aot`，也不需要
   `_lora_aot_graph.py`。
 
@@ -62,6 +66,41 @@ adapter 的场景也能安装补丁。实际是否启用三路分流仍由下述
 
 把交付目录简单添加到 `PYTHONPATH`，不一定能覆盖已安装的同名普通 Python 包；
 应把新增文件合入实际使用的 `netrsn_turbo` 包。
+
+## 与 DS LoRA v2 统一安装
+
+同时使用 `netrsnturbo_patch_v2` 时，将两个交付目录中的 `netrsn_turbo/` 子树合入
+实际工程。DS 的实现路径是 `turbo/version_0300/ds_lora/`，AOT 的实现路径是
+`turbo/version_v0300/`，两者均需部署。DS 的 `turbo_ops` 构建步骤沿用其 README。
+
+外层 v0.30.0 LoRA 分支改为只加载联合入口：
+
+```python
+import netrsn_turbo.turbo_manager.version_v0300.turbo_ds_lora_aot  # noqa: F401
+```
+
+该入口直接调用 `apply_lora_patch(with_aot=True)`，不依赖 `ADAPTATION_PKG_ID`。
+不要再导入独立的 `turbo_ds_lora`、`turbo_lora_aot` 或原生 VA AOT 入口；父进程和
+spawn worker 都由外层选择同一个联合入口并执行一次。入口不添加版本、硬件或重复安装检查。
+
+联合 installer 先对原始 `_dummy_run` 做 DS 单点源码改写，再构造 AOT 包装，
+最终 `_dummy_run` 只注册一次。其余 19 个 DS 目标和 4 个 AOT 目标一起注册，
+最后执行一次 `TurboManager.apply_patches()`，随后更新 W8A8 的冻结注册项。
+两个独立入口仍可分别用于仅 DS 或仅 AOT 的部署。
+
+LoRA 数量统一按以下优先级传递给 `_dummy_run` 方法体及 dummy adapter context：
+
+| 场景 | `num_active_loras` |
+| --- | --- |
+| capture 前显式预热 `base` / `base_one` | 0，优先于 `is_profile=True` |
+| 普通首次 profiling | `lora_config.max_loras` |
+| 普通图预热、捕获 | 调用方传入的数量，缺省为 0 |
+| 模型配置未启用 AOT | 保持 DS 改写后的行为 |
+
+普通 profiling 因而包含 LoRA 编译和内存估算；base 两个变体仍在图捕获前预热。
+方法体的图描述与实际 dummy adapter 使用同一个数量，不依赖原 VA 强制激活
+`max_loras` 的旧逻辑。先加载独立 AOT 再做 DS 源码改写会破坏 DS 要求的包装层结构；
+使用联合入口避免这一顺序冲突。
 
 ## 启用范围
 
@@ -140,8 +179,10 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-本地结果：109 项 CPU 测试通过。测试模拟 TurboManager 文档规定的属性替换和模块引用传播，覆盖三路分流、
+测试模拟 TurboManager 文档规定的属性替换和模块引用传播，覆盖三路分流、
 缓存重载、编译失败恢复、图预热、模型运行条件、外层运行环境选择、直接注册及安装异常传播。
+联合回归还执行真实 DS worker 源码改写与 AOT 包装，检查 profiling、base 预热、
+LoRA 图捕获的数量一致性，以及单次注册和统一应用。
 当前工作区没有完整私有 NetrsnTurbo 引擎，也没有 NPU；仍需在目标环境验证真实
 TurboManager、spawn 加载、AOT 保存/加载、ACL graph 捕获/重放、输出正确性和性能。
 

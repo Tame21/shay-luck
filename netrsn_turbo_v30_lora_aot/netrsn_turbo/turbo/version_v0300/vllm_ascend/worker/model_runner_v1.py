@@ -37,18 +37,21 @@ def wrap_dummy_run(original_dummy_run):
         if not enabled(self.vllm_config):
             return original_dummy_run(self, *args, **kwargs)
 
+        bound = dummy_signature.bind(self, *args, **kwargs)
         count = getattr(self, _DUMMY_LORA_COUNT_ATTR, None)
         if count is None:
-            bound = dummy_signature.bind(self, *args, **kwargs)
-            # Ordinary profiling must still activate dummy adapters so the
-            # initial compilation and memory estimate include the LoRA path.
-            if not bound.arguments.get("is_profile", False) and "num_active_loras" in bound.arguments:
-                count = bound.arguments["num_active_loras"]
-        if count is None:
-            return original_dummy_run(self, *args, **kwargs)
+            if bound.arguments.get("is_profile", False):
+                # Include LoRA compilation and memory in ordinary profiling.
+                # The explicit zero override used by base warmup takes priority.
+                count = self.lora_config.max_loras
+            else:
+                count = bound.arguments.get("num_active_loras", 0)
 
+        # DS LoRA's rewritten body uses this argument for both the graph
+        # descriptor and dummy adapters. Keep those states consistent.
+        bound.arguments["num_active_loras"] = count
         with _dummy_lora_count(self, count):
-            return original_dummy_run(self, *args, **kwargs)
+            return original_dummy_run(*bound.args, **bound.kwargs)
 
     return dummy_run
 

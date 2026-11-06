@@ -84,6 +84,22 @@ tests/                        无硬件测试及可选 NPU 回归
 `manifest.py` 仅作补丁范围核对，不再驱动安装循环。入口不安装 import hook，
 也不维护已应用模块或初始化状态；版本分发、导入时序和防重复注册由 Netrsn 负责。
 调用入口时会加载所需的原模块和补丁模块，应接入 Netrsn 已有的 LoRA 初始化阶段。
+
+与 `netrsn_turbo_v30_lora_aot` 配套时，合入两份交付的 `netrsn_turbo/` 子树，外层只导入：
+
+```python
+import netrsn_turbo.turbo_manager.version_v0300.turbo_ds_lora_aot  # noqa: F401
+```
+
+联合入口调用 `apply_lora_patch(with_aot=True)`，先进行 DS `_dummy_run` 源码改写，
+再加上 AOT 包装，只注册最终的一个 worker 方法。它一共注册 **24 个不同目标**，
+执行一次 `TurboManager.apply_patches()`，然后保留原有的 W8A8 注册项更新。
+普通 profiling 显式激活 `max_loras`，base/base_one 预热使用 0，其他图预热与捕获
+使用调用方数量；参数会同时传入图描述和 dummy adapter context。
+联合部署不再加载独立 `turbo_ds_lora`、`turbo_lora_aot` 或原生 VA AOT 入口，
+也不受 `ADAPTATION_PKG_ID` 限制，版本和每个 worker 的单次安装仍由外层决定。
+默认 `apply_lora_patch()` 保持仅安装 DS 的 20 个目标，无须部署 AOT 文件。
+
 入口先调用框架自带的 `vllm_ascend._ensure_global_patch()`，完成 Ascend 平台补丁，
 再加载 `vllm_ascend.ops` 和 `vllm_ascend.lora` 模块。若先导入
 `lora.fused_moe`，它加载 `ops` 时会经 `prepare_finalize` 回读尚未定义的

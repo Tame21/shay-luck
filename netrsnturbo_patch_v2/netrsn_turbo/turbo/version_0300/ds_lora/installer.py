@@ -24,11 +24,12 @@ def _checked_init(initializer):
     return initialize
 
 
-def apply_lora_patch():
+def apply_lora_patch(*, with_aot=False):
     """Register and apply DS LoRA in Netrsn's existing LoRA startup branch.
 
     Netrsn owns version dispatch, import ordering and duplicate registration.
     Its spawn-worker entry must call this in each worker process as usual.
+    with_aot composes the three-variant AOT payload before the single apply.
     """
     from netrsn_turbo.turbo_manager.turbo_utils import TurboManager
     from vllm_ascend import _ensure_global_patch
@@ -63,6 +64,16 @@ def apply_lora_patch():
 
     # This payload is a factory: retain the loaded method's body and globals.
     dummy_run = worker_patch._dummy_run(NPUModelRunner._dummy_run)
+    if with_aot:
+        from netrsn_turbo.turbo.version_v0300.vllm.compilation import decorators as aot_decorators
+        from netrsn_turbo.turbo.version_v0300.vllm.compilation import wrapper as aot_wrapper
+        from netrsn_turbo.turbo.version_v0300.vllm_ascend.worker import model_runner_v1 as aot_runner
+        from vllm.compilation import decorators
+        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
+        # Rewrite the native inference-mode method before adding AOT wrappers.
+        # Register only the final callable, so both patches own one target.
+        dummy_run = aot_runner.wrap_dummy_run(dummy_run)
 
     # New attributes have no original implementation to replace or propagate.
     punica_npu.build_combined_lora_idx = punica_patch.build_combined_lora_idx
@@ -170,6 +181,24 @@ def apply_lora_patch():
         "vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run",
         dummy_run,
     )
+
+    if with_aot:
+        TurboManager.register_patch(
+            "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper.__init__",
+            aot_wrapper.wrap_init(TorchCompileWithNoGuardsWrapper.__init__),
+        )
+        TurboManager.register_patch(
+            "vllm.compilation.decorators._try_load_aot_compiled_fn",
+            aot_decorators.wrap_try_load_aot_compiled_fn(decorators._try_load_aot_compiled_fn),
+        )
+        TurboManager.register_patch(
+            "vllm_ascend.worker.model_runner_v1.NPUModelRunner.maybe_dummy_run_with_lora",
+            aot_runner.wrap_maybe_dummy_run_with_lora(NPUModelRunner.maybe_dummy_run_with_lora),
+        )
+        TurboManager.register_patch(
+            "vllm_ascend.worker.model_runner_v1.NPUModelRunner.capture_model",
+            aot_runner.wrap_capture_model(NPUModelRunner.capture_model),
+        )
 
     TurboManager.apply_patches()
 

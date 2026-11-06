@@ -40,12 +40,13 @@ def graph_hooks(request, monkeypatch):
                     model="local/model",
                     enforce_eager=not enabled,
                 ),
-                lora_config=SimpleNamespace(fully_sharded_loras=False),
+                lora_config=SimpleNamespace(fully_sharded_loras=False, max_loras=4),
                 use_v2_model_runner=False,
                 compilation_config=SimpleNamespace(
                     mode=3, backend="inductor", cudagraph_mode=1, cudagraph_specialize_lora=True
                 ),
             )
+            self.lora_config = self.vllm_config.lora_config
             self.max_num_tokens = max_tokens
             self.fail_dummy = False
 
@@ -116,12 +117,19 @@ def graph_hooks(request, monkeypatch):
     return Runner, calls, helper
 
 
-@pytest.mark.parametrize("kwargs", [{"is_profile": True}, {"is_profile": True, "num_active_loras": 0}, {}])
+@pytest.mark.parametrize("kwargs", [{"is_profile": True}, {"is_profile": True, "num_active_loras": 0}])
 def test_initial_profiling_keeps_dummy_adapters(graph_hooks, kwargs):
     runner_cls, calls, _ = graph_hooks
     runner = runner_cls()
     assert runner._dummy_run(8, **kwargs) == 8
+    assert ("dummy", 8, True, 4) in calls
     assert ("mapping", 4) in calls
+
+
+def test_non_profile_default_count_matches_base_descriptor(graph_hooks):
+    runner_cls, calls, _ = graph_hooks
+    assert runner_cls()._dummy_run(8) == 8
+    assert calls == [("dummy", 8, False, 0), ("mapping", 0)]
 
 
 @pytest.mark.parametrize("count", [0, 2])
